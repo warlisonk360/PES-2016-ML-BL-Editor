@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PES 2016 ML-BL Editor (PC)
+Comment=Editor de saves do PES 2016 (Master League / Become a Legend)
+Exec=pes2016-mlbl-editor
+Icon=pes2016-mlbl-editor
+Categories=Utility;Game;
+Terminal=false

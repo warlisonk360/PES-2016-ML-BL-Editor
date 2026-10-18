@@ -1,0 +1,27 @@
+# saves do jogo e backups (são dados seus - não subir)
+BL00000000*
+ML00000000*
+EDIT00000000*
+*.bak
+
+# programas de terceiros (o original do extream87, crypters, editores etc.)
+\[XBOX 360-PC\]*
+PES 2016 Edit Crypter*/
+PES 2016 Player Editor*/
+
+# arquivos gerados pelo empacotamento / PyInstaller
+PES2016-MLBL-Editor-PC-x86_64.AppImage
+PES2016-MLBL-Editor-Windows-x64.exe
+*.spec
+build/
+build_*/
+dist/
+dist_*/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# editor/IDE
+.vscode/
+.idea/

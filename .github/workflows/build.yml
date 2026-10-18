@@ -1,0 +1,114 @@
+name: build
+
+# Gera os dois arquivos do editor:
+#   - Windows: PES2016-MLBL-Editor-Windows-x64.exe   (PyInstaller)
+#   - Linux:   PES2016-MLBL-Editor-PC-x86_64.AppImage (AppImage + Python portátil)
+#
+# - Em qualquer push/PR os arquivos ficam disponíveis como "artifacts".
+# - Ao criar uma tag (ex.: v1.0.0), uma release é publicada automaticamente
+#   com os dois arquivos anexados.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gerar o .exe
+        shell: pwsh
+        run: ./empacotamento/build-exe-windows.ps1
+
+      - name: Teste rápido - o .exe abre uma janela?
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "PES2016-MLBL-Editor-Windows-x64.exe").Path
+          $p = Start-Process -FilePath $exe -PassThru
+          $titulo = ""
+          for ($i = 0; $i -lt 20 -and -not $p.HasExited -and -not $titulo; $i++) {
+            Start-Sleep -Seconds 3
+            $p.Refresh()
+            if (-not $p.HasExited) { $titulo = $p.MainWindowTitle }
+          }
+          if ($p.HasExited) { throw "o .exe fechou sozinho (codigo $($p.ExitCode))" }
+          if (-not $titulo) { throw "o .exe nao abriu janela em 60 s" }
+          Write-Host "OK - janela aberta: $titulo"
+          $p.Kill()
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Windows-exe
+          path: PES2016-MLBL-Editor-Windows-x64.exe
+          if-no-files-found: warn
+
+  linux:
+    name: Linux (AppImage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gerar a AppImage
+        run: |
+          chmod +x empacotamento/build-appimage.sh empacotamento/AppRun
+          ./empacotamento/build-appimage.sh
+
+      - name: Teste rápido - a AppImage abre?
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          set +e
+          timeout 25 xvfb-run -a ./PES2016-MLBL-Editor-PC-x86_64.AppImage \
+              --appimage-extract-and-run
+          rc=$?
+          set -e
+          if [ "$rc" -ne 124 ]; then
+            echo "::error::a AppImage saiu com codigo $rc (esperado 124 = continuava rodando)"
+            exit 1
+          fi
+          echo "OK - a AppImage abriu e continuou rodando"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Linux-AppImage
+          path: PES2016-MLBL-Editor-PC-x86_64.AppImage
+          if-no-files-found: warn
+
+  release:
+    name: Publicar release
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefatos
+          merge-multiple: true
+
+      - name: Publicar no GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PES 2016 ML-BL Editor $GITHUB_REF_NAME" \
+            --notes-file "LEIA-ME - Editor PC (Linux e Windows).md" \
+            --latest \
+            artefatos/*
