@@ -185,3 +185,7 @@ O programa original `[XBOX 360-PC] PES 2016 ML-BL Editor.exe` é de autoria de
 **extream87** e **não** faz parte deste repositório: aqui existe apenas uma
 reimplementação independente, feita por engenharia reversa para uso pessoal.
 Use por sua conta e risco, sempre com backup dos saves.
+
+Os saves e o jogo são seus; "Pro Evolution Soccer" e "PES" são marcas da
+**Konami Digital Entertainment** — este projeto não é afiliado nem endossado
+por ela.
