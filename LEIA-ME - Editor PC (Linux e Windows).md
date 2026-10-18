@@ -243,10 +243,27 @@ Portada do projeto de domínio público
   push — e, ao criar uma tag (ex.: `v1.2.0`), publica os dois numa release.
 
 ## Arquivos
-| Plataforma | Arquivo | sha256 |
-|---|---|---|
-| Linux (x86_64) | `PES2016-MLBL-Editor-PC-x86_64.AppImage` | `8831c224a32a8f1739236dff045cec12e37971e60893d736e886576acd2908f2` |
-| Windows (x64) | `PES2016-MLBL-Editor-Windows-x64.exe` | `470b19a73c69c786347635c62414fdf245f2f826737c37143ab5f2cd9297f00b` |
+| Plataforma | Arquivo |
+|---|---|
+| Linux (x86_64) | `PES2016-MLBL-Editor-PC-x86_64.AppImage` |
+| Windows (x64) | `PES2016-MLBL-Editor-Windows-x64.exe` |
+
+Os dois são gerados automaticamente pelo **GitHub Actions** (veja
+`.github/workflows/build.yml`) a cada push e ficam anexados na página de
+**Releases** quando você cria uma tag. Como o build recompila tudo (e o
+AppImage guarda a data), o sha256 **muda de uma release para outra**; para
+conferir um download:
+
+```
+sha256sum PES2016-MLBL-Editor-Windows-x64.exe
+```
+
+Conferidos na release **v1.2.0** (build do CI):
+
+| Arquivo | sha256 |
+|---|---|
+| `PES2016-MLBL-Editor-PC-x86_64.AppImage` | `b39cff5646105e9318286afbd13d8e381b660cc1329ee658b96c4d1d8be89c9b` |
+| `PES2016-MLBL-Editor-Windows-x64.exe` | `ad4e3e822f4ccd59e10acdee01c385862d4f7a8fd26a2210892a22abaf739c5e` |
 
 Como as duas versões vieram do **mesmo código**, qualquer coisa que você editar
 numa aparece igual na outra.
