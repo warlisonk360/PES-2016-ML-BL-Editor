@@ -10,7 +10,7 @@ Serve para comparar o que está GRAVADO no arquivo com o que o jogo mostra.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "codigo-fonte-pc"))
 
 from pes2016mlbl import core as C
 

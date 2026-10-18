@@ -222,6 +222,9 @@ Portada do projeto de domínio público
   de abrir → editar → gravar nas **três cópias** (BL em texto puro, snapshot
   comprimido da carreira e banco do EDIT).
 - Sem telemetria/phone-home.
+- Os scripts usados para descobrir os offsets (engenharia reversa) ficam em
+  `ferramentas/` — eles **não** fazem parte do programa: são só para conferir ou
+  refazer o mapeamento (precisam dos saves reais na raiz do projeto).
 
 ## Novidades desta versão (18/10)
 - **Versão para Windows**: um `.exe` único (`PES2016-MLBL-Editor-Windows-x64.exe`,
@@ -267,5 +270,15 @@ Conferidos na release **v1.2.0** (build do CI):
 
 Como as duas versões vieram do **mesmo código**, qualquer coisa que você editar
 numa aparece igual na outra.
+
+## Licença
+
+MIT © 2026 Warlison Santos — veja o arquivo [`LICENSE`](LICENSE). Pode usar,
+modificar e distribuir, mantendo o aviso de copyright.
+
+O programa original (`[XBOX 360-PC] PES 2016 ML-BL Editor.exe`) é de **extream87**
+e não faz parte deste repositório: aqui há uma reimplementação independente,
+feita por engenharia reversa para uso pessoal. Use por sua conta e risco,
+sempre com backup dos saves.
 
 Baseado em engenharia reversa estática (REA + ILSpy) e validação in-game.

@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "codigo-fonte-pc"))
 
 from pes2016mlbl import core as C, pes16crypt as CR
 

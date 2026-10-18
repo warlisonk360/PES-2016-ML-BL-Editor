@@ -1,4 +1,5 @@
 [![build](https://github.com/warlisonk360/PES-2016-ML-BL-Editor/actions/workflows/build.yml/badge.svg)](https://github.com/warlisonk360/PES-2016-ML-BL-Editor/actions/workflows/build.yml)
+[![licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green.svg)](LICENSE)
 
 # PES 2016 ML-BL Editor (PC) — Linux e Windows
 
@@ -130,6 +131,28 @@ roda os testes e gera o arquivo final na raiz do repositório.
 python3 codigo-fonte-pc/test_core.py
 ```
 
+### 🧰 Ferramentas de engenharia reversa (`ferramentas/`)
+
+Scripts usados para descobrir e validar os offsets. **Não fazem parte do
+programa** — servem para conferir/refazer o mapeamento. Todos precisam de um
+save real (`BL00000000.original` / `EDIT00000000.original`) na raiz do projeto,
+então não rodam no repositório (os saves não são versionados).
+
+| Script | Para que serve |
+|---|---|
+| `ver_save.py` | mostra tudo o que o editor consegue ler de um save, sem alterar nada |
+| `derivar_edit4.py` | descobre os offsets das habilidades dentro do `EDIT00000000` |
+| `derivar_edit5.py` | descobre altura, peso e idade no `EDIT00000000` |
+| `verificar_edit.py` | confere o layout do `EDIT` contra o `BL` |
+| `gerar_teste.py` | gera saves de teste com valores bem visíveis, para conferir no jogo |
+| `gerar_teste_edit.py` | gera um par `BL` + `EDIT` de teste |
+
+Exemplo:
+
+```bash
+python3 ferramentas/ver_save.py "/caminho/do/save/BL00000000"
+```
+
 ### Releases automáticos
 
 O workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) gera os
@@ -155,8 +178,10 @@ abre?) e **anexa os dois arquivos na release**.
 
 ## 📄 Licença
 
-Ainda **não definida** — o autor do repositório deve escolher uma (por
-exemplo, MIT) e adicionar um arquivo `LICENSE`.
+[MIT](LICENSE) © 2026 Warlison Santos — pode usar, estudar, modificar e
+redistribuir, mantendo o aviso de copyright.
 
-O código é fruto de engenharia reversa para uso pessoal: use por sua conta e
-risco, sempre com backup dos saves.
+O programa original `[XBOX 360-PC] PES 2016 ML-BL Editor.exe` é de autoria de
+**extream87** e **não** faz parte deste repositório: aqui existe apenas uma
+reimplementação independente, feita por engenharia reversa para uso pessoal.
+Use por sua conta e risco, sempre com backup dos saves.
