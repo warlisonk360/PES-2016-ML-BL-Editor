@@ -202,6 +202,12 @@ def write_stats(buf: bytearray, stats: dict) -> None:
 #     injury         bit 368 (2 bits, stored = in-game - 1, so 1..3)
 #     weak foot freq.bit 370 (2 bits, stored = in-game - 1, so 1..4)
 #
+# The *active* injury (the one that keeps the player out) is separate from the
+# "injury resistance" above and is a plain byte at +0x0E: 0 = healthy, any
+# other value = injured (the game's own code).  It was recovered by diffing
+# the same BAL career before and after the player recovered - the byte went
+# 44 -> 0 in both the plain record and the compressed snapshot.
+#
 # The game shows some of these one higher than they are stored; FIELD_BIAS
 # below hides that from the UI.
 
@@ -210,6 +216,11 @@ PLAYER_NAME_OFFSET = 0x40
 PLAYER_NAME_LEN = 46
 PLAYER_HEIGHT_OFFSET = 0x0C
 PLAYER_WEIGHT_OFFSET = 0x0D
+# Active injury state: 0 = healthy, anything else = injured (the game stores
+# its own code there; 44 was seen on a player out injured).  Found by diffing
+# the same career before/after the player recovered: the byte went 44 -> 0 in
+# both copies (plain record and career snapshot).  Writing 0 heals the player.
+PLAYER_INJURY_STATE_OFFSET = 0x0E
 
 # (key, label, kind, pos, width, max).  kind is "bit" (pos = bit offset) or
 # "byte" (pos = byte offset).
@@ -243,6 +254,7 @@ PLAYER_FIELDS = [
     ("weak_foot_accuracy", "Pior pé: precisão (1-4)",   "bit", 366, 2, 4),
     ("form",               "Condição física (1-8)",     "bit", 220, 3, 8),
     ("injury",             "Resistência a lesão (1-3)", "bit", 368, 2, 3),
+    ("injury_state",       "Lesão ativa (0 = saudável)", "byte", PLAYER_INJURY_STATE_OFFSET, 0, 255),
     ("age",                "Idade",                     "bit", 320, 6, 63),
     ("height",             "Altura (cm)",               "byte", PLAYER_HEIGHT_OFFSET, 0, 255),
     ("weight",             "Peso (kg)",                 "byte", PLAYER_WEIGHT_OFFSET, 0, 130),
@@ -268,8 +280,8 @@ PLAYER_GROUPS = [
         "goalkeeping", "gk_catching", "gk_clearing", "gk_reflexes",
         "gk_coverage")]),
     ("Físico / outros", [f[0] for f in PLAYER_FIELDS if f[0] in (
-        "weak_foot_usage", "weak_foot_accuracy", "form", "injury", "age",
-        "height", "weight", "stronger_foot")]),
+        "weak_foot_usage", "weak_foot_accuracy", "form", "injury",
+        "injury_state", "age", "height", "weight", "stronger_foot")]),
 ]
 
 PLAYER_FIELD_BY_KEY = {f[0]: f for f in PLAYER_FIELDS}

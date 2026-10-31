@@ -71,7 +71,11 @@ chmod +x PES2016-MLBL-Editor-PC-x86_64.AppImage
   Focus (0–100) e botão *Max Stats*;
 - aba **Habilidades**: as 17 habilidades da tela do jogo, as 5 de goleiro,
   **condição física (1–8)**, **resistência a lesão (1–3)**, **pior pé**
-  (frequência e precisão, 1–4), **melhor pé**, idade, altura e peso.
+  (frequência e precisão, 1–4), **melhor pé**, idade, altura e peso;
+- **lesão ativa** (`0` = saudável): coloque `0` para **curar** o jogador que
+  está machucado e não joga. O jogo grava um código próprio nesse byte (vi `44`
+  num jogador lesionado); voltar para `0` o libera na hora. É o único valor
+  testado — não invente outros.
 
 ### ⚠️ No BAL o jogador existe em três lugares
 

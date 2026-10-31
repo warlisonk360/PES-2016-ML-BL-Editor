@@ -110,6 +110,10 @@ você aplicar sem mudar nada, o arquivo sai **idêntico** ao original.
       frequência (1–4)**, **Pior pé: precisão (1–4)**, **Melhor pé** (direito/
       esquerdo), **Idade**, **Altura** e **Peso** — os valores são mostrados
       como o jogo mostra (por exemplo, a condição física vai de 1 a 8)
+    - **Lesão ativa** (`0` = saudável): é o campo que **cura** o jogador
+      machucado. O jogo guarda ali um código próprio (`44` num jogador
+      lesionado); voltar para `0` libera o jogador na hora. Só o valor `0` foi
+      validado — não invente outros.
     - O jogador é localizado **pelo nome** (botão *Procurar*), não por offset
       fixo; o editor grava em **todas** as cópias do registro que encontrar:
       as do `BL00000000` (texto puro **e** o snapshot comprimido da carreira)
@@ -158,6 +162,15 @@ seja, o container começa já no meio do registro do seu jogador).
 | Resistência a lesão (valor do jogo − 1) | 368 | 2 |
 | Pior pé: frequência (valor do jogo − 1) | 370 | 2 |
 | Altura / Peso | bytes `0x0C` / `0x0D` | 1 cada |
+| Lesão ativa (0 = saudável) | byte `0x0E` | 1 |
+
+A **lesão ativa** (`+0x0E`, 1 byte) foi descoberta comparando a mesma carreira
+antes e depois de o jogador se recuperar: o byte passou de `44` para `0` tanto
+no registro em texto puro quanto no snapshot comprimido. Como o snapshot usa
+registros de 220 bytes (e o primeiro pode começar com base "negativa"), o
+editor escreve o campo pelos offsets do registro, e não por posição fixa no
+arquivo. Esse campo **não** existe no `EDIT00000000` (lá o byte `+0x0E` é outra
+coisa — não mexa).
 
 ### Layout no `EDIT00000000` (banco de jogadores)
 
@@ -226,7 +239,18 @@ Portada do projeto de domínio público
   `ferramentas/` — eles **não** fazem parte do programa: são só para conferir ou
   refazer o mapeamento (precisam dos saves reais na raiz do projeto).
 
-## Novidades desta versão (18/10)
+## Novidades desta versão (31/10)
+- **Lesão ativa / curar jogador** (aba Habilidades, grupo *Físico / outros*):
+  o campo **Lesão ativa** mostra o byte que o jogo usa para deixar o jogador
+  fora (num WARLISON lesionado estava `44`). Coloque **`0`** e o jogador volta
+  a ficar disponível — o editor grava no registro em texto puro **e** no
+  snapshot comprimido da carreira. **Confirmado no jogo** ✔
+- Descoberto comparando a mesma carreira antes/depois da recuperação: o byte
+  `+0x0E` do registro foi de `44` para `0` nos dois lugares. Só o valor `0`
+  foi validado (não invente outros códigos de lesão).
+- Esse campo **não** existe no `EDIT00000000` (lá o `+0x0E` é outra coisa).
+
+## Novidades da versão anterior (18/10)
 - **Versão para Windows**: um `.exe` único (`PES2016-MLBL-Editor-Windows-x64.exe`,
   x64, sem instalação), com ícone, informações de versão no arquivo e o mesmo
   comportamento da AppImage.
