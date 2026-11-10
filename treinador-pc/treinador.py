@@ -36,7 +36,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 APP_TITLE = "PES 2016 - Treinador (memoria)"
-APP_VERSION = "0.1"
+APP_VERSION = "0.3"
 
 # Layout do registro do jogador (o mesmo do save de 228 bytes).
 RECORD_SIZE = 0xE4
@@ -52,6 +52,10 @@ INJURY_TEST = 44          # codigo visto no save de um jogador lesionado
 
 CHUNK = 8 * 1024 * 1024
 DEFAULT_PLAYER = "WARLISON"
+
+# Dinheiro da Liga Master: o jogo guarda o valor exibido dividido por 100
+# (ex.: $28.706.900 -> 287069), como int32 little-endian.
+MONEY_SCALE = 100
 
 # O editor de save tem os offsets/bits dos outros campos; reaproveitamos para
 # mostrar condicao fisica etc.  Se o modulo nao existir, o painel funciona
@@ -281,6 +285,66 @@ def write_fields(pid: int, copias: list[Copy], vals: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Dinheiro da Liga Master
+# ---------------------------------------------------------------------------
+def find_money_addresses(pid: int, saldo: int) -> list[int]:
+    """Procura o saldo da ML na memoria (valor exibido / 100).
+
+    O saldo fica num int32 little-endian em unidades de 100.  Procuramos so em
+    regioes legiveis e graváveis (rw) para evitar bibliotecas so-leitura.
+    """
+    alvo = int(saldo) // MONEY_SCALE
+    needle = struct.pack("<i", alvo)
+    achados: list[int] = []
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDONLY)
+    try:
+        for ini, fim, perms, caminho, _off in read_maps(pid):
+            if "r" not in perms or "w" not in perms:
+                continue
+            if caminho in ("[vvar]", "[vsyscall]", "[vdso]"):
+                continue
+            pos = ini
+            while pos < fim:
+                bloco = min(CHUNK, fim - pos)
+                try:
+                    dados = os.pread(fd, bloco, pos)
+                except OSError:
+                    pos += bloco
+                    continue
+                if not dados:
+                    break
+                indice = dados.find(needle)
+                while indice != -1:
+                    achados.append(pos + indice)
+                    indice = dados.find(needle, indice + 1)
+                pos += max(1, len(dados) - len(needle) + 1)
+    finally:
+        os.close(fd)
+    return achados
+
+
+def read_money(pid: int, addr: int) -> int:
+    """Le o saldo (valor ja multiplicado por 100, como o jogo exibe)."""
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDONLY)
+    try:
+        bruto = struct.unpack_from("<i", os.pread(fd, 4, addr))[0]
+    finally:
+        os.close(fd)
+    return bruto * MONEY_SCALE
+
+
+def write_money(pid: int, addr: int, saldo: int) -> int:
+    """Grava o saldo (valor exibido). Devolve o que ficou gravado."""
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDWR)
+    try:
+        os.pwrite(fd, struct.pack("<i", int(saldo) // MONEY_SCALE), addr)
+        bruto = struct.unpack_from("<i", os.pread(fd, 4, addr))[0]
+    finally:
+        os.close(fd)
+    return bruto * MONEY_SCALE
+
+
+# ---------------------------------------------------------------------------
 # Atalhos globais (X11, sem dependencia externa)
 # ---------------------------------------------------------------------------
 class X11Hotkeys(threading.Thread):
@@ -441,6 +505,131 @@ class AtributosWindow(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
+# Janela do dinheiro da Liga Master
+# ---------------------------------------------------------------------------
+class DinheiroWindow(tk.Toplevel):
+    """Localiza e edita o saldo da Liga Master na memoria."""
+
+    def __init__(self, app: "TreinadorApp"):
+        super().__init__(app.master)
+        self.app = app
+        self.title("Dinheiro da Liga Master (memoria)")
+        self.geometry("540x280")
+        self.transient(app.master)
+        self.addr: int | None = None
+        self._fila: queue.Queue = queue.Queue()
+
+        ttk.Label(self, text="Saldo atual ($) — o valor que aparece no jogo:"
+                  ).pack(anchor="w", padx=10, pady=(10, 2))
+        linha = ttk.Frame(self)
+        linha.pack(fill="x", padx=10)
+        self.var_saldo = tk.StringVar()
+        ttk.Entry(linha, textvariable=self.var_saldo, width=22).pack(side="left")
+        ttk.Button(linha, text="Localizar", command=self.localizar).pack(
+            side="left", padx=8)
+
+        self.lbl_status = ttk.Label(
+            self, text="Informe o saldo e clique em Localizar.", foreground="#555")
+        self.lbl_status.pack(anchor="w", padx=10, pady=6)
+
+        ttk.Separator(self).pack(fill="x", padx=10, pady=6)
+
+        ttk.Label(self, text="Novo saldo ($):").pack(anchor="w", padx=10)
+        linha2 = ttk.Frame(self)
+        linha2.pack(fill="x", padx=10, pady=(2, 6))
+        self.var_novo = tk.StringVar()
+        ttk.Entry(linha2, textvariable=self.var_novo, width=22).pack(side="left")
+        self.btn_aplicar = ttk.Button(linha2, text="Aplicar",
+                                      command=self.aplicar, state="disabled")
+        self.btn_aplicar.pack(side="left", padx=8)
+
+        self.lbl_end = ttk.Label(self, text="", foreground="#555")
+        self.lbl_end.pack(anchor="w", padx=10)
+        ttk.Button(self, text="Fechar", command=self.destroy).pack(
+            anchor="e", padx=10, pady=8)
+
+        self.after(200, self._poll)
+
+    def _poll(self):
+        try:
+            while True:
+                tipo, dado = self._fila.get_nowait()
+                if tipo == "ok":
+                    self._mostrar(dado)
+                elif tipo == "erro":
+                    self.lbl_status.configure(
+                        text=f"Erro: {dado}", foreground="#a00")
+        except queue.Empty:
+            pass
+        self.after(200, self._poll)
+
+    def localizar(self):
+        if self.app.pid is None:
+            return
+        try:
+            saldo = int(self.var_saldo.get().replace(".", "")
+                        .replace(",", "").strip())
+        except ValueError:
+            messagebox.showwarning(APP_TITLE,
+                                   "Digite o saldo atual so com numeros.")
+            return
+        self.lbl_status.configure(
+            text="Procurando na memoria... pode levar alguns segundos.",
+            foreground="#b60")
+        self.btn_aplicar.configure(state="disabled")
+        threading.Thread(target=self._buscar, args=(saldo,),
+                         daemon=True).start()
+
+    def _buscar(self, saldo: int):
+        try:
+            hits = find_money_addresses(self.app.pid, saldo)  # type: ignore[arg-type]
+            self._fila.put(("ok", hits))
+        except Exception as exc:  # noqa: BLE001
+            self._fila.put(("erro", str(exc)))
+
+    def _mostrar(self, hits: list[int]):
+        if not hits:
+            self.addr = None
+            self.lbl_status.configure(
+                text="Nao achei esse saldo. Confira o valor (sem centavos).",
+                foreground="#a00")
+            return
+        self.addr = hits[0]
+        atual = read_money(self.app.pid, self.addr)  # type: ignore[arg-type]
+        self.lbl_status.configure(
+            text=f"Saldo localizado ({len(hits)} ocorrencia(s)).",
+            foreground="#070")
+        self.lbl_end.configure(
+            text=(f"Endereco: 0x{self.addr:x} — leitura atual: "
+                  f"${atual:,}".replace(",", ".")))
+        self.var_novo.set(str(atual))
+        self.btn_aplicar.configure(state="normal")
+        self.app._log(f"Dinheiro ML localizado em 0x{self.addr:x} "
+                      f"({len(hits)} ocorrencia(s)).")
+
+    def aplicar(self):
+        if self.app.pid is None or self.addr is None:
+            return
+        try:
+            novo = int(self.var_novo.get().replace(".", "")
+                       .replace(",", "").strip())
+        except ValueError:
+            messagebox.showwarning(APP_TITLE,
+                                   "Digite o novo saldo so com numeros.")
+            return
+        try:
+            ficou = write_money(self.app.pid, self.addr, novo)  # type: ignore[arg-type]
+        except OSError as exc:
+            messagebox.showerror(APP_TITLE, f"Nao consegui gravar: {exc}")
+            return
+        texto = f"${ficou:,}".replace(",", ".")
+        self.lbl_status.configure(text=f"Saldo gravado: {texto}",
+                                  foreground="#070")
+        self.app._log(f"Saldo da ML gravado: {texto} "
+                      "(abra a tela de orcamento de novo para reler).")
+
+
+# ---------------------------------------------------------------------------
 # Interface
 # ---------------------------------------------------------------------------
 class TreinadorApp(ttk.Frame):
@@ -505,6 +694,10 @@ class TreinadorApp(ttk.Frame):
                                         command=self.abrir_atributos,
                                         state="disabled")
         self.btn_atributos.pack(side="left", padx=8)
+        self.btn_dinheiro = ttk.Button(acoes, text="Dinheiro ML...",
+                                       command=self.abrir_dinheiro,
+                                       state="disabled")
+        self.btn_dinheiro.pack(side="left")
         ttk.Label(acoes, text="   F9 = curar   |   F10 = reconectar",
                   foreground="#555").pack(side="left", padx=10)
 
@@ -525,7 +718,7 @@ class TreinadorApp(ttk.Frame):
     def _set_botoes(self, ativo: bool):
         estado = "normal" if ativo else "disabled"
         for botao in (self.btn_curar, self.btn_testar, self.btn_atualizar,
-                      self.btn_atributos):
+                      self.btn_atributos, self.btn_dinheiro):
             botao.configure(state=estado)
 
     def _preencher(self):
@@ -580,10 +773,12 @@ class TreinadorApp(ttk.Frame):
         self._preencher()
         if not copias:
             self.lbl_status.configure(
-                text="Jogador nao encontrado na memoria", foreground="#a00")
-            self._log("Nenhuma copia valida encontrada. O jogador esta na "
-                      "carreira? O nome esta certo?")
+                text=f"Conectado (PID {self.pid}) - jogador nao encontrado",
+                foreground="#b60")
+            self._log("Nenhuma copia valida do jogador encontrada. Se estiver "
+                      "na Liga Master, use 'Dinheiro ML...' mesmo assim.")
             self._set_botoes(False)
+            self.btn_dinheiro.configure(state="normal")
             return
         self.lbl_status.configure(
             text=f"Conectado (PID {self.pid}) - {len(copias)} copia(s)",
@@ -633,6 +828,11 @@ class TreinadorApp(ttk.Frame):
         if self.pid is None or not self.copias:
             return
         self._janela_atributos = AtributosWindow(self)
+
+    def abrir_dinheiro(self):
+        if self.pid is None:
+            return
+        self._janela_dinheiro = DinheiroWindow(self)
 
     def atualizar(self):
         if self.pid is None or not self.copias:

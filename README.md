@@ -101,6 +101,9 @@ do jogo aberto** (Bottles/Wine), para o que precisa valer na hora — hoje:
 - **Atributos ao vivo** (**Atributos...**): os 31 campos do registro do jogador
   (habilidades, goleiro, físico) com **Aplicar** e **Max habilidades**; grava
   só os bytes que mudam, nas cópias da carreira;
+- **Dinheiro da Liga Master** (**Dinheiro ML...**): localiza o saldo pelo valor
+  que aparece no jogo e permite definir outro (ex.: `$28.706.900` →
+  `$50.000.000`);
 - Atalhos globais **F9** (curar) e **F10** (reconectar);
 - **Não toca no arquivo do save**: só na memória.
 

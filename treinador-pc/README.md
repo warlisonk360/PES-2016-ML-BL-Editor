@@ -12,6 +12,9 @@ do editor de save, que mexe no arquivo. Serve para mudanças que precisam valer
   como no editor de save — habilidades, goleiro, físico (condição, resistência
   a lesão, pior pé, idade, altura, peso) e o botão **Max habilidades**
   (preenche só os campos que vão até 99, sem gravar ainda);
+- **Dinheiro da Liga Master** (janela **Dinheiro ML...**): localiza o saldo na
+  memória a partir do valor que aparece no jogo e permite definir um novo
+  (ex.: `$28.706.900` → `$50.000.000`);
 - **Reconectar** depois de reiniciar o jogo (os endereços mudam a cada sessão —
   o painel procura o registro pelo **nome + layout**, não por endereço fixo);
 - Atalhos **F9** (curar) e **F10** (reconectar), inclusive com a janela do jogo
@@ -50,6 +53,25 @@ mudou).
 > Os atributos são gravados no **registro da carreira** (na memória). O banco do
 > EDIT não fica carregado na memória enquanto você não abre o menu Edit, então o
 > painel não mexe nele.
+
+### Dinheiro da Liga Master
+
+O botão **Dinheiro ML...** serve para o saldo do time na Liga Master:
+
+1. abra **Ver orçamento de salário** no jogo e veja o **Saldo atual**;
+2. no painel, digite esse valor em **Saldo atual ($)** e clique em **Localizar**
+   (a busca leva ~3 s);
+3. confira o endereço/leitura mostrados e digite o valor desejado em
+   **Novo saldo ($)** → **Aplicar**;
+4. volte e abra a tela de orçamento de novo para reler.
+
+O jogo guarda o saldo como **int32 little-endian em unidades de 100** (por isso
+`$28.706.900` vira `287069` na memória). O painel acha o endereço **pelo valor**
+informado, então não depende de endereço fixo — que muda a cada sessão. Como o
+orçamento final é só `saldo − salários`, ele se ajusta sozinho.
+
+> Depois de aplicar, **não avance o dia nem salve** até conferir; a Liga Master
+> grava no disco quando o dia avança.
 
 ## Como ele acha o jogador
 
@@ -99,3 +121,10 @@ A escrita de **atributos** também foi validada ao vivo: mudando o `attack`
 bytes que mudam, nas cópias da carreira. Alguns indicadores, como a setinha de
 **Condição** da tela de pré-jogo, só são recalculados quando o dia avança ou a
 partida começa.
+
+O **dinheiro da Liga Master** foi descoberto comparando o valor da tela com a
+memória: `$28.706.900` aparecia como `287069` (÷100) num `int32`, num único
+endereço da região anônima da carreira. Teste de escrita: `$28.706.900` →
+`$50.000.000` refletiu na tela de orçamento (e o final recalculou para
+`$30.504.800`); depois foi revertido. O endereço muda a cada sessão, por isso a
+busca é feita **pelo valor** informado.
