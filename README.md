@@ -89,6 +89,21 @@ O editor localiza os três automaticamente e, ao aplicar, **grava nos três de
 uma vez** (recomprime o snapshot e recalcula tamanhos/offsets). O `EDIT00000000`
 é procurado na mesma pasta do `BL00000000`.
 
+### 🧠 Treinador ao vivo (Linux, opcional)
+
+`treinador-pc/treinador.py` é um painel separado que **lê e escreve na memória
+do jogo aberto** (Bottles/Wine), para o que precisa valer na hora — hoje:
+**curar a lesão** do jogador do BAL sem fechar o jogo.
+
+- Acha o processo `PES2016.exe` e o registro pelo **nome + layout** (sem
+  endereço fixo: os endereços mudam a cada execução);
+- Mostra ao vivo ID, altura, peso, lesão ativa e condição física;
+- Atalhos globais **F9** (curar) e **F10** (reconectar);
+- **Não toca no arquivo do save**: só na memória.
+
+Requer Python 3 + Tkinter (`python3-tk`). **Somente Linux.**
+Detalhes em `treinador-pc/README.md`.
+
 ## 🛡️ Segurança
 
 - Sempre que grava em cima do próprio arquivo, o programa cria um `.bak`.

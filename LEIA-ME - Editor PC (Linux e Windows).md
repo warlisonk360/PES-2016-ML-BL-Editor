@@ -222,6 +222,27 @@ Portada do projeto de domínio público
 - `encrypt(decrypt(x)) == x` (ida e volta sem perdas);
 - o jogo carrega normalmente o save re-criptografado.
 
+## Treinador ao vivo (memória) — Linux
+
+Além do editor de save, o projeto tem um **painel separado** que mexe na
+memória do jogo **aberto** (Bottles/Wine), para mudanças que precisam valer na
+hora: `treinador-pc/treinador.py` (veja o README da pasta).
+
+- **Curar lesão** do jogador do BAL com o jogo aberto (byte `+0x0E = 0`);
+- Mostra ao vivo ID, altura, peso, lesão ativa e condição física;
+- Atalhos globais **F9** (curar) e **F10** (reconectar);
+- Procura o registro pelo **nome + layout**, não por endereço fixo (os
+  endereços mudam a cada execução);
+- **Não toca no arquivo do save**: só na memória.
+
+Como foi validado: gravando `44` nas 3 cópias do registro em RAM, a tela de
+Escalação do jogo mostrou o jogador **lesionado**; gravando `0`, voltou ao
+normal. Durante os testes o `BL00000000` em disco ficou intacto (SHA-256
+conferido).
+
+Requisitos: Python 3 + Tkinter (`python3-tk`) e o jogo aberto na carreira.
+Se o kernel bloquear a leitura (`ptrace_scope=1`), veja o README do treinador.
+
 ## Observações
 - O hash/checksum no cabeçalho do save **não é verificado pelo jogo**
   (confirmado na documentação do pesXdecrypter) — não precisa recalculá-lo.
@@ -239,7 +260,17 @@ Portada do projeto de domínio público
   `ferramentas/` — eles **não** fazem parte do programa: são só para conferir ou
   refazer o mapeamento (precisam dos saves reais na raiz do projeto).
 
-## Novidades desta versão (31/10)
+## Novidades desta versão (09/11)
+- **Treinador ao vivo** (`treinador-pc/`): painel que lê/escreve na memória do
+  jogo aberto no Linux (Bottles/Wine) e **cura a lesão** do jogador do BAL sem
+  fechar o jogo. Mostra ID, altura, peso, lesão e condição ao vivo, com atalhos
+  globais **F9** (curar) e **F10** (reconectar). **Confirmado no jogo** ✔
+  (com `44` na memória o jogador aparece lesionado na Escalação; com `0`, volta
+  ao normal — e o save em disco não é tocado).
+- O truque é achar o registro pelo **nome + layout** (não por endereço fixo):
+  a cópia da carreira na RAM é **idêntica** aos 228 bytes do save.
+
+## Novidades da versão anterior (31/10)
 - **Lesão ativa / curar jogador** (aba Habilidades, grupo *Físico / outros*):
   o campo **Lesão ativa** mostra o byte que o jogo usa para deixar o jogador
   fora (num WARLISON lesionado estava `44`). Coloque **`0`** e o jogador volta
