@@ -230,6 +230,8 @@ hora: `treinador-pc/treinador.py` (veja o README da pasta).
 
 - **Curar lesão** do jogador do BAL com o jogo aberto (byte `+0x0E = 0`);
 - Mostra ao vivo ID, altura, peso, lesão ativa e condição física;
+- **Atributos ao vivo** (botão **Atributos...**): os 31 campos do registro do
+  jogador (habilidades, goleiro, físico) com **Aplicar** e **Max habilidades**;
 - Atalhos globais **F9** (curar) e **F10** (reconectar);
 - Procura o registro pelo **nome + layout**, não por endereço fixo (os
   endereços mudam a cada execução);
@@ -237,8 +239,14 @@ hora: `treinador-pc/treinador.py` (veja o README da pasta).
 
 Como foi validado: gravando `44` nas 3 cópias do registro em RAM, a tela de
 Escalação do jogo mostrou o jogador **lesionado**; gravando `0`, voltou ao
-normal. Durante os testes o `BL00000000` em disco ficou intacto (SHA-256
-conferido).
+normal. Depois, mudando o **Ataque de 99 para 40**, a tela de dados do jogador
+mostrou **Habil. ofensiva = 40** na hora (e o valor foi revertido). Durante os
+testes o `BL00000000` em disco ficou intacto (SHA-256 conferido).
+
+Ao aplicar atributos, o painel compara byte a byte e grava **só o que mudou**
+nas cópias da carreira, para não sobrescrever estado do jogo. Alguns
+indicadores (como a setinha de **Condição** na tela de pré-jogo) só são
+recalculados quando o dia avança/começa a partida — não mudam ao vivo.
 
 Requisitos: Python 3 + Tkinter (`python3-tk`) e o jogo aberto na carreira.
 Se o kernel bloquear a leitura (`ptrace_scope=1`), veja o README do treinador.
@@ -267,6 +275,10 @@ Se o kernel bloquear a leitura (`ptrace_scope=1`), veja o README do treinador.
   globais **F9** (curar) e **F10** (reconectar). **Confirmado no jogo** ✔
   (com `44` na memória o jogador aparece lesionado na Escalação; com `0`, volta
   ao normal — e o save em disco não é tocado).
+- **Atributos ao vivo** no treinador: janela **Atributos...** com os 31 campos
+  do registro (habilidades, goleiro, físico), botão **Aplicar** (grava só os
+  bytes que mudam nas cópias da carreira) e **Max habilidades**. **Confirmado no
+  jogo** ✔ (Ataque 99 → 40 refletiu na hora em *Habil. ofensiva*).
 - O truque é achar o registro pelo **nome + layout** (não por endereço fixo):
   a cópia da carreira na RAM é **idêntica** aos 228 bytes do save.
 

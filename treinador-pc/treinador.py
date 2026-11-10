@@ -245,6 +245,41 @@ def read_injuries(pid: int, copias: list[Copy]) -> list[int]:
         os.close(fd)
 
 
+def read_record(pid: int, base: int) -> bytes:
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDONLY)
+    try:
+        return os.pread(fd, RECORD_SIZE, base)
+    finally:
+        os.close(fd)
+
+
+def write_fields(pid: int, copias: list[Copy], vals: dict) -> int:
+    """Grava campos do registro em todas as copias, so os bytes que mudam.
+
+    Escrever apenas os bytes alterados evita sobrescrever, sem querer, algo
+    que o jogo tenha atualizado entre a leitura e a gravacao.
+    """
+    if SAVE is None:
+        raise RuntimeError("modulo do editor de save nao encontrado")
+    fd = os.open(f"/proc/{pid}/mem", os.O_RDWR)
+    total = 0
+    try:
+        for copia in copias:
+            antes = bytearray(os.pread(fd, RECORD_SIZE, copia.base))
+            if len(antes) < RECORD_SIZE:
+                continue
+            depois = bytearray(antes)
+            SAVE.write_player(depois, 0, vals)
+            for indice in range(RECORD_SIZE):
+                if antes[indice] != depois[indice]:
+                    os.pwrite(fd, bytes([depois[indice]]),
+                              copia.base + indice)
+                    total += 1
+    finally:
+        os.close(fd)
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Atalhos globais (X11, sem dependencia externa)
 # ---------------------------------------------------------------------------
@@ -328,6 +363,84 @@ class X11Hotkeys(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
+# Janela de atributos
+# ---------------------------------------------------------------------------
+class AtributosWindow(tk.Toplevel):
+    """Todos os campos do registro do jogador (lidos/gravados na memoria)."""
+
+    def __init__(self, app: "TreinadorApp"):
+        super().__init__(app.master)
+        self.app = app
+        self.title("Atributos do jogador (memoria)")
+        self.geometry("560x640")
+        self.transient(app.master)
+        self.vars: dict[str, tk.IntVar] = {}
+
+        if SAVE is None or not app.copias:
+            ttk.Label(self, text="Modulo do editor de save nao encontrado.").pack(
+                pady=20)
+            return
+
+        registro = read_record(app.pid, app.copias[0].base)  # type: ignore[arg-type]
+        vals = SAVE.read_player(bytearray(registro), 0)
+
+        fora = ttk.Frame(self)
+        fora.pack(fill="both", expand=True)
+        canvas = tk.Canvas(fora, borderwidth=0, highlightthickness=0)
+        barra = ttk.Scrollbar(fora, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=barra.set)
+        barra.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        interno = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=interno, anchor="nw")
+        interno.bind("<Configure>", lambda _e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.bind("<Button-4>", lambda _e: canvas.yview_scroll(-2, "units"))
+        canvas.bind("<Button-5>", lambda _e: canvas.yview_scroll(2, "units"))
+
+        for titulo, chaves in SAVE.PLAYER_GROUPS:
+            grupo = ttk.LabelFrame(interno, text=titulo, padding=6)
+            grupo.pack(fill="x", expand=True, padx=6, pady=4)
+            for indice, key in enumerate(chaves):
+                _k, label, _kind, _pos, _w, mx = SAVE.PLAYER_FIELD_BY_KEY[key]
+                lo = SAVE.FIELD_BIAS.get(key, 0)
+                var = tk.IntVar(value=int(vals.get(key, lo)))
+                self.vars[key] = var
+                ttk.Label(grupo, text=f"{label}:").grid(
+                    row=indice, column=0, sticky="w", pady=1)
+                ttk.Spinbox(grupo, from_=lo, to=mx, textvariable=var,
+                            width=6).grid(row=indice, column=1, padx=6)
+
+        botoes = ttk.Frame(self)
+        botoes.pack(fill="x", padx=8, pady=8)
+        ttk.Button(botoes, text="Aplicar", command=self.aplicar).pack(side="left")
+        ttk.Button(botoes, text="Max habilidades",
+                   command=self.max_habilidades).pack(side="left", padx=8)
+        ttk.Button(botoes, text="Fechar", command=self.destroy).pack(side="right")
+
+    def aplicar(self):
+        if SAVE is None or not self.app.copias:
+            return
+        try:
+            vals = {k: int(v.get()) for k, v in self.vars.items()}
+            total = write_fields(self.app.pid, self.app.copias, vals)  # type: ignore[arg-type]
+        except (OSError, tk.TclError, RuntimeError) as exc:
+            messagebox.showerror(APP_TITLE, f"Nao consegui gravar: {exc}")
+            return
+        self.app.atualizar()
+        self.app._log(f"Atributos gravados ({total} byte(s) alterado(s)) em "
+                      f"{len(self.app.copias)} copia(s).")
+        self.app._log("Saia e entre de novo na tela do jogo para reler.")
+
+    def max_habilidades(self):
+        if SAVE is None:
+            return
+        for key, var in self.vars.items():
+            if SAVE.PLAYER_FIELD_BY_KEY[key][5] == 99:
+                var.set(99)
+
+
+# ---------------------------------------------------------------------------
 # Interface
 # ---------------------------------------------------------------------------
 class TreinadorApp(ttk.Frame):
@@ -388,6 +501,10 @@ class TreinadorApp(ttk.Frame):
                                         command=self.atualizar,
                                         state="disabled")
         self.btn_atualizar.pack(side="left")
+        self.btn_atributos = ttk.Button(acoes, text="Atributos...",
+                                        command=self.abrir_atributos,
+                                        state="disabled")
+        self.btn_atributos.pack(side="left", padx=8)
         ttk.Label(acoes, text="   F9 = curar   |   F10 = reconectar",
                   foreground="#555").pack(side="left", padx=10)
 
@@ -407,7 +524,8 @@ class TreinadorApp(ttk.Frame):
 
     def _set_botoes(self, ativo: bool):
         estado = "normal" if ativo else "disabled"
-        for botao in (self.btn_curar, self.btn_testar, self.btn_atualizar):
+        for botao in (self.btn_curar, self.btn_testar, self.btn_atualizar,
+                      self.btn_atributos):
             botao.configure(state=estado)
 
     def _preencher(self):
@@ -510,6 +628,11 @@ class TreinadorApp(ttk.Frame):
         self._log(f"Jogador {rotulo}: {lidos} (0x{valor:02x})")
         if rotulo.startswith("curado"):
             self._log("Dica: entre/saia da tela do jogo para ela reler o valor.")
+
+    def abrir_atributos(self):
+        if self.pid is None or not self.copias:
+            return
+        self._janela_atributos = AtributosWindow(self)
 
     def atualizar(self):
         if self.pid is None or not self.copias:

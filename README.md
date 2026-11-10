@@ -98,6 +98,9 @@ do jogo aberto** (Bottles/Wine), para o que precisa valer na hora — hoje:
 - Acha o processo `PES2016.exe` e o registro pelo **nome + layout** (sem
   endereço fixo: os endereços mudam a cada execução);
 - Mostra ao vivo ID, altura, peso, lesão ativa e condição física;
+- **Atributos ao vivo** (**Atributos...**): os 31 campos do registro do jogador
+  (habilidades, goleiro, físico) com **Aplicar** e **Max habilidades**; grava
+  só os bytes que mudam, nas cópias da carreira;
 - Atalhos globais **F9** (curar) e **F10** (reconectar);
 - **Não toca no arquivo do save**: só na memória.
 
