@@ -1,0 +1,8 @@
+build/
+*.pdb
+*.lib
+*.obj
+*.o
+*.exp
+modmenu.log
+d3d9_real.dll
