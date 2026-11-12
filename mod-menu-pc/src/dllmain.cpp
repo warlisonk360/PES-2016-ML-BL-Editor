@@ -14,6 +14,7 @@
 #include <d3d9.h>
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,8 @@ static char g_log_path[MAX_PATH] = {0};
 static bool g_menu_open = false;
 static bool g_imgui_ready = false;
 static bool g_safe_mode = false;
+static bool g_autoscan = false;
+static bool g_autoscan_done = false;
 static HWND g_hwnd = nullptr;
 static IDirect3DDevice9* g_device = nullptr;
 
@@ -57,6 +60,8 @@ static void init_paths(HMODULE self) {
     char flag[MAX_PATH];
     snprintf(flag, sizeof(flag), "%smodmenu_nohook.txt", path);
     g_safe_mode = GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
+    snprintf(flag, sizeof(flag), "%smodmenu_autoscan.txt", path);
+    g_autoscan = GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
 }
 
 static void logmsg(const char* fmt, ...) {
@@ -72,6 +77,334 @@ static void logmsg(const char* fmt, ...) {
     va_end(ap);
     fputc('\n', f);
     fclose(f);
+}
+
+// ---------------------------------------------------------------------------
+// Memoria do proprio jogo (Etapa 2)
+// ---------------------------------------------------------------------------
+// Como a DLL roda dentro do PES2016.exe, lemos/escrevemos direto na memoria.
+// Tudo aqui so age quando o usuario aperta um botao do menu.
+static const uint32_t PLAYER_RECORD_SIZE = 0xE4;
+static const uint32_t PLAYER_NAME_OFFSET = 0x40;
+static const uint32_t PLAYER_NAME_LEN = 46;
+static const uint32_t PLAYER_ID_OFFSET = 0x38;
+static const uint32_t PLAYER_HEIGHT_OFFSET = 0x0C;
+static const uint32_t PLAYER_WEIGHT_OFFSET = 0x0D;
+static const uint32_t PLAYER_INJURY_OFFSET = 0x0E;
+static const int MONEY_SCALE = 100;
+static const int MAX_HITS = 64;
+
+struct PlayerCopy {
+    uintptr_t base;
+    uint32_t id;
+    uint8_t injury;
+};
+
+static char g_player_name[32] = "WARLISON";
+static PlayerCopy g_player_copies[8] = {};
+static uint8_t g_player_injury_orig[8] = {};
+static int g_player_copy_count = 0;
+static bool g_player_found = false;
+
+static int g_money_atual = 0;
+static int g_money_novo = 0;
+// Campos digitaveis como texto: com navegacao por teclado, InputInt vira tres
+// itens de foco (campo + botoes +/-).  Texto numerico e um item so.
+static char g_money_atual_buf[24] = "";
+static char g_money_novo_buf[24] = "";
+static uintptr_t g_money_addr[8] = {};
+static int32_t g_money_raw[8] = {};
+static int32_t g_money_antes[8] = {};   // valor original, para reverter
+static int g_money_count = 0;
+static bool g_money_found = false;
+static bool g_money_pending = false;   // validacao de estabilidade pendente
+static DWORD g_money_check_at = 0;
+
+// Regiao legivel? (a protecao pode vir com flags extras, por isso a mascara)
+static bool prot_readable(DWORD prot) {
+    if (prot & PAGE_GUARD) return false;
+    switch (prot & 0xFF) {
+        case PAGE_READONLY:
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READ:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool prot_writable(DWORD prot) {
+    switch (prot & 0xFF) {
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool safe_read(uintptr_t addr, void* dst, size_t n) {
+    if (!addr || !dst || !n) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || !prot_readable(mbi.Protect)) return false;
+    uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    if (addr + n > end) return false;
+    memcpy(dst, (const void*)addr, n);
+    return true;
+}
+
+static bool safe_write(uintptr_t addr, const void* src, size_t n) {
+    if (!addr || !src || !n) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) return false;
+    if (mbi.State != MEM_COMMIT || !prot_writable(mbi.Protect)) return false;
+    memcpy((void*)addr, src, n);
+    return true;
+}
+
+// Procura "needle" nas regioes legiveis do processo.  Pula o proprio modulo
+// (para nao achar o buffer do campo de texto do menu).
+static int scan_bytes(const void* needle, size_t nlen, bool somente_gravavel,
+                      uintptr_t* out, int max_out) {
+    int achados = 0;
+    if (!needle || nlen < 2) return 0;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    uintptr_t addr = (uintptr_t)si.lpMinimumApplicationAddress;
+    uintptr_t limite = (uintptr_t)si.lpMaximumApplicationAddress;
+    const size_t chunk = 1u << 20;
+    unsigned char* buf = (unsigned char*)malloc(chunk);
+    if (!buf) return 0;
+
+    while (addr < limite && achados < max_out) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) break;
+        uintptr_t base = (uintptr_t)mbi.BaseAddress;
+        uintptr_t next = base + mbi.RegionSize;
+        if (next <= addr) break;
+
+        if (mbi.State == MEM_COMMIT && (HMODULE)mbi.AllocationBase != g_self &&
+            mbi.Type != MEM_IMAGE &&   // nao procurar dentro de DLLs/EXEs
+            prot_readable(mbi.Protect) &&
+            (!somente_gravavel || prot_writable(mbi.Protect))) {
+            for (uintptr_t pos = base; pos < next && achados < max_out;) {
+                size_t bloco = (size_t)(next - pos);
+                if (bloco > chunk) bloco = chunk;
+                memcpy(buf, (const void*)pos, bloco);
+                for (size_t i = 0; i + nlen <= bloco && achados < max_out;
+                     ++i) {
+                    if (buf[i] == ((const unsigned char*)needle)[0] &&
+                        memcmp(buf + i, needle, nlen) == 0) {
+                        out[achados++] = pos + i;
+                        i += nlen - 1;   // nao conta o mesmo hit duas vezes
+                    }
+                }
+                pos += bloco;   // pequena perda nas bordas: aceitavel aqui
+            }
+        }
+        addr = next;
+    }
+    free(buf);
+    return achados;
+}
+
+// Acha as copias do registro do jogador e escolhe o grupo com o ID mais comum
+// (mesma heuristica do treinador externo).
+static void player_search() {
+    g_player_found = false;
+    g_player_copy_count = 0;
+    size_t nlen = strlen(g_player_name);
+    if (nlen < 2) {
+        logmsg("busca: nome muito curto");
+        return;
+    }
+    DWORD t0 = GetTickCount();
+    uintptr_t hits[MAX_HITS];
+    int nhits = scan_bytes(g_player_name, nlen, false, hits, MAX_HITS);
+    logmsg("busca de '%s': %d ocorrencias", g_player_name, nhits);
+
+    PlayerCopy cand[MAX_HITS];
+    int nc = 0;
+    for (int i = 0; i < nhits; ++i) {
+        uintptr_t base = hits[i] - PLAYER_NAME_OFFSET;
+        if (base > hits[i]) continue;
+        unsigned char rec[PLAYER_RECORD_SIZE];
+        if (!safe_read(base, rec, sizeof(rec))) continue;
+        if (memcmp(rec + PLAYER_NAME_OFFSET, g_player_name, nlen) != 0) continue;
+        if (nlen < PLAYER_NAME_LEN && rec[PLAYER_NAME_OFFSET + nlen] != 0)
+            continue;
+        unsigned char altura = rec[PLAYER_HEIGHT_OFFSET];
+        unsigned char peso = rec[PLAYER_WEIGHT_OFFSET];
+        if (altura < 140 || altura > 230 || peso < 30 || peso > 150) continue;
+        bool repetido = false;
+        for (int j = 0; j < nc; ++j)
+            if (cand[j].base == base) repetido = true;
+        if (repetido || nc >= MAX_HITS) continue;
+        cand[nc].base = base;
+        memcpy(&cand[nc].id, rec + PLAYER_ID_OFFSET, 4);
+        cand[nc].injury = rec[PLAYER_INJURY_OFFSET];
+        ++nc;
+    }
+    logmsg("registros validos: %d (%.1f s)", nc,
+           (GetTickCount() - t0) / 1000.0);
+
+    if (nc == 0) return;
+
+    // Escolhe o ID nao-zero mais comum.
+    uint32_t melhor_id = 0;
+    int melhor_qtd = 0;
+    for (int i = 0; i < nc; ++i) {
+        if (!cand[i].id) continue;
+        int qtd = 0;
+        for (int j = 0; j < nc; ++j)
+            if (cand[j].id == cand[i].id) ++qtd;
+        if (qtd > melhor_qtd) {
+            melhor_qtd = qtd;
+            melhor_id = cand[i].id;
+        }
+    }
+
+    for (int i = 0; i < nc && g_player_copy_count < 8; ++i) {
+        if (melhor_id && cand[i].id != melhor_id) continue;
+        g_player_copies[g_player_copy_count] =
+            {cand[i].base, cand[i].id, cand[i].injury};
+        g_player_injury_orig[g_player_copy_count] = cand[i].injury;
+        ++g_player_copy_count;
+    }
+    g_player_found = g_player_copy_count > 0;
+    if (g_player_found)
+        logmsg("jogador escolhido: ID=%08x copias=%d lesao=%d", melhor_id,
+               g_player_copy_count, g_player_copies[0].injury);
+}
+
+static void player_write_injury(uint8_t valor) {
+    for (int i = 0; i < g_player_copy_count; ++i) {
+        uintptr_t addr = g_player_copies[i].base + PLAYER_INJURY_OFFSET;
+        uint8_t antes = 0;
+        if (!safe_read(addr, &antes, 1)) continue;
+        if (!safe_write(addr, &valor, 1)) continue;
+        logmsg("lesao copia %d: %u -> %u (0x%08x)", i, antes, valor,
+               (unsigned)addr);
+        g_player_copies[i].injury = valor;
+    }
+}
+
+static void player_revert_injury() {
+    for (int i = 0; i < g_player_copy_count; ++i) {
+        uintptr_t addr = g_player_copies[i].base + PLAYER_INJURY_OFFSET;
+        uint8_t valor = g_player_injury_orig[i];
+        if (!safe_write(addr, &valor, 1)) continue;
+        logmsg("lesao copia %d revertida para %u (0x%08x)", i, valor,
+               (unsigned)addr);
+        g_player_copies[i].injury = valor;
+    }
+}
+
+static void money_search() {
+    g_money_found = false;
+    g_money_count = 0;
+    g_money_atual = atoi(g_money_atual_buf);
+    if (g_money_atual <= 0) {
+        logmsg("dinheiro: informe o saldo atual");
+        return;
+    }
+    int32_t alvo = g_money_atual / MONEY_SCALE;
+    DWORD t0 = GetTickCount();
+    uintptr_t hits[MAX_HITS];
+    int nhits = scan_bytes(&alvo, 4, true, hits, MAX_HITS);
+    for (int i = 0; i < nhits && g_money_count < 8; ++i) {
+        // Dinheiro em int32 alinhado; endereco desalinhado e quase sempre
+        // coincidencia de buffer.
+        if (hits[i] & 3) continue;
+        int32_t raw = 0;
+        if (!safe_read(hits[i], &raw, 4) || raw != alvo) continue;
+        g_money_addr[g_money_count] = hits[i];
+        g_money_raw[g_money_count] = raw;
+        g_money_antes[g_money_count] = raw;   // valor original do jogo
+        ++g_money_count;
+    }
+    g_money_found = g_money_count > 0;
+    logmsg("dinheiro: alvo=%d achados=%d (%.1f s)", alvo, g_money_count,
+           (GetTickCount() - t0) / 1000.0);
+
+    // Confere os candidatos alguns quadros depois: endereco que ja mudou de
+    // valor e lixo de buffer, nao o saldo do jogo.
+    g_money_check_at = GetTickCount() + 500;
+    g_money_pending = g_money_found;
+}
+
+// Chamado a cada quadro: descarta candidatos instaveis (valor ja mudou).
+static void money_validate() {
+    if (!g_money_pending) return;
+    if (GetTickCount() < g_money_check_at) return;
+    g_money_pending = false;
+    int manteve = 0;
+    for (int i = 0; i < g_money_count; ++i) {
+        int32_t agora = 0;
+        if (!safe_read(g_money_addr[i], &agora, 4) ||
+            agora != g_money_antes[i]) {
+            logmsg("dinheiro 0x%08x: descartado (valor instavel)",
+                   (unsigned)g_money_addr[i]);
+            continue;
+        }
+        g_money_addr[manteve] = g_money_addr[i];
+        g_money_raw[manteve] = g_money_raw[i];
+        g_money_antes[manteve] = g_money_antes[i];
+        ++manteve;
+    }
+    if (manteve != g_money_count)
+        logmsg("dinheiro: %d candidato(s) estavel(is) de %d", manteve,
+               g_money_count);
+    g_money_count = manteve;
+    g_money_found = g_money_count > 0;
+}
+
+// Valor que esta agora na memoria (para mostrar no menu).
+static int32_t money_current() {
+    int32_t v = 0;
+    if (g_money_count > 0 && safe_read(g_money_addr[0], &v, 4)) return v;
+    return -1;
+}
+
+static void money_apply() {
+    g_money_novo = atoi(g_money_novo_buf);
+    if (g_money_novo <= 0) {
+        logmsg("dinheiro: informe o novo saldo");
+        return;
+    }
+    int32_t novo = g_money_novo / MONEY_SCALE;
+    for (int i = 0; i < g_money_count; ++i) {
+        uintptr_t addr = g_money_addr[i];
+        int32_t antes = 0;
+        if (!safe_read(addr, &antes, 4)) {
+            logmsg("dinheiro 0x%08x: nao consegui ler, pulando",
+                   (unsigned)addr);
+            continue;
+        }
+        // Se o valor mudou desde a busca (outra tela/carregamento), nao grava:
+        // o endereco pode ter sido reaproveitado por outra coisa.
+        if (antes != g_money_antes[i]) {
+            logmsg("dinheiro 0x%08x: valor mudou (%d, esperado %d), nao gravei",
+                   (unsigned)addr, antes, g_money_antes[i]);
+            continue;
+        }
+        if (!safe_write(addr, &novo, 4)) continue;
+        logmsg("dinheiro 0x%08x: %d -> %d", (unsigned)addr, antes, novo);
+    }
+}
+
+static void money_revert() {
+    for (int i = 0; i < g_money_count; ++i) {
+        if (!safe_write(g_money_addr[i], &g_money_antes[i], 4)) continue;
+        logmsg("dinheiro 0x%08x revertido para %d", (unsigned)g_money_addr[i],
+               g_money_antes[i]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -145,13 +478,30 @@ static HRESULT STDMETHODCALLTYPE hook_CreateDeviceEx(
 static WNDPROC g_orig_wndproc = nullptr;
 
 static LRESULT CALLBACK hook_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (!g_menu_open)
+        return CallWindowProcW(g_orig_wndproc, hwnd, msg, wp, lp);
+
     // Esc fecha o menu (e nao chega ao jogo).
-    if (g_menu_open && msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
         g_menu_open = false;
         logmsg("menu fechado (Esc)");
         return 1;
     }
-    if (g_menu_open && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
+
+    // Menu aberto = modal: o teclado vai so para o ImGui, nunca para o jogo.
+    switch (msg) {
+        case WM_KEYDOWN:
+        case WM_KEYUP:
+        case WM_CHAR:
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+        case WM_SYSCHAR:
+            ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
+            return 1;
+        default:
+            break;
+    }
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
         return 1;
     return CallWindowProcW(g_orig_wndproc, hwnd, msg, wp, lp);
 }
@@ -188,6 +538,11 @@ static HRESULT STDMETHODCALLTYPE hook_EndScene(IDirect3DDevice9* dev) {
     if (agora && !antes) {
         g_menu_open = !g_menu_open;
         logmsg("menu %s (Insert)", g_menu_open ? "ABERTO" : "fechado");
+        if (g_menu_open && g_autoscan && !g_autoscan_done) {
+            g_autoscan_done = true;
+            logmsg("autoscan: procurando '%s'", g_player_name);
+            player_search();
+        }
     }
     antes = agora;
 
@@ -196,23 +551,68 @@ static HRESULT STDMETHODCALLTYPE hook_EndScene(IDirect3DDevice9* dev) {
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        money_validate();
 
         ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(460, 240), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(660, 520), ImGuiCond_FirstUseEver);
         ImGui::Begin("PES 2016 - Mod Menu (injetado)");
-        ImGui::Text("Injecao/hook D3D9 funcionando!");
         ImGui::Text("Device: %p   HWND: %p", (void*)dev, (void*)g_hwnd);
-        ImGui::Separator();
-        static int cliques = 0;
-        if (ImGui::Button("Gravar teste no log")) {
-            ++cliques;
-            logmsg("botao de teste acionado dentro do menu (%d)", cliques);
-        }
-        ImGui::SameLine();
-        ImGui::Text("acionamentos: %d", cliques);
         ImGui::TextDisabled(
             "Insert abre/fecha. Setas + Enter navegam. Esc fecha.");
-        ImGui::TextDisabled("Etapa 1: sem alterar o jogo.");
+        ImGui::SeparatorText("Etapa 2: memoria ao vivo");
+
+        // ---- Jogador / lesao -------------------------------------------------
+        ImGui::SetNextItemWidth(190);
+        ImGui::InputText("Nome do jogador", g_player_name,
+                         sizeof(g_player_name));
+        ImGui::SameLine();
+        if (ImGui::Button("Procurar jogador")) player_search();
+        if (g_player_found) {
+            ImGui::Text("copias=%d   ID=%08X   lesao=%u",
+                        g_player_copy_count, g_player_copies[0].id,
+                        g_player_copies[0].injury);
+            if (ImGui::Button("Curar lesao")) player_write_injury(0);
+            ImGui::SameLine();
+            if (ImGui::Button("Lesionar (teste)")) player_write_injury(44);
+            ImGui::SameLine();
+            if (ImGui::Button("Reverter lesao")) player_revert_injury();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(leitura original guardada)");
+        } else {
+            ImGui::TextDisabled(
+                "Digite o nome exato do jogador e procure.");
+        }
+
+        // ---- Dinheiro da Liga Master ----------------------------------------
+        ImGui::SeparatorText("Dinheiro da Liga Master");
+        ImGui::TextDisabled(
+            "Digite o saldo do jogo (ex.: 27486800) e confirme com Enter.");
+        ImGui::SetNextItemWidth(200);
+        ImGui::InputText("Saldo atual", g_money_atual_buf,
+                         sizeof(g_money_atual_buf),
+                         ImGuiInputTextFlags_CharsDecimal);
+        if (ImGui::IsItemDeactivatedAfterEdit()) money_search();
+        ImGui::SameLine();
+        if (ImGui::Button("Procurar saldo")) money_search();
+        if (g_money_found) {
+            ImGui::Text("enderecos=%d   na memoria=%.0f", g_money_count,
+                        money_current() * (double)MONEY_SCALE);
+            ImGui::SetNextItemWidth(200);
+            ImGui::InputText("Novo saldo", g_money_novo_buf,
+                             sizeof(g_money_novo_buf),
+                             ImGuiInputTextFlags_CharsDecimal);
+            if (ImGui::IsItemDeactivatedAfterEdit()) money_apply();
+            ImGui::SameLine();
+            if (ImGui::Button("Aplicar")) money_apply();
+            ImGui::SameLine();
+            if (ImGui::Button("Reverter")) money_revert();
+        } else {
+            ImGui::TextDisabled(
+                "Informe o saldo que aparece no jogo e procure.");
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Nada e gravado sem apertar um botao.");
         ImGui::End();
 
         ImGui::Render();

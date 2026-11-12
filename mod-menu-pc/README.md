@@ -1,11 +1,11 @@
-# Mod menu injetado (PC) — Etapa 1
+# Mod menu injetado (PC) — Etapas 1 e 2
 
 Menu desenhado **por cima do jogo** (ImGui via Direct3D 9), aberto com
 **Insert**. Roda dentro do `PES2016.exe` como um **proxy `d3d9.dll`**.
 
-> Estado atual: **Etapa 1** — só prova a injeção e o hook, sem alterar nada do
-> jogo. A edição de memória (lesão, atributos, dinheiro) continua no
-> [treinador externo](../treinador-pc/README.md) por enquanto.
+> Estado atual: **Etapa 2** — além de provar a injeção, o menu lê e grava na
+> memória do próprio jogo (cura de lesão e dinheiro da Liga Master), sempre com
+> ação explícita e opção de reverter. O save em disco não é tocado.
 
 ## Como funciona
 
@@ -24,9 +24,33 @@ PES2016.exe
 - Os hooks são instalados **no lugar** (patch do slot com `VirtualProtect`), sem
   trocar o ponteiro da vtable — trocar o ponteiro quebra o DXVK.
 - O menu é desenhado **antes** da `EndScene` original.
-- `Insert` abre/fecha; `Esc` fecha; **setas + Enter** navegam no menu (o jogo
-  prende o cursor no X11, então mouse absoluto não funciona).
+- `Insert` abre/fecha; `Esc` fecha; **setas/Tab + Enter** navegam no menu (o
+  jogo prende o cursor no X11, então mouse absoluto não funciona).
 - `modmenu.log` (ao lado da DLL) registra o que aconteceu.
+
+## O que o menu faz
+
+| Seção | Ação |
+|---|---|
+| **Jogador** | digite o nome exato, **Procurar jogador** localiza o registro na memória e mostra as cópias, o ID e a lesão atual |
+| | **Curar lesão** grava `0`; **Lesionar (teste)** grava `44`; **Reverter lesão** volta ao valor lido |
+| **Dinheiro da Liga Master** | digite o saldo que aparece em **Negociação → Fundos do time** e aperte Enter (ou **Procurar saldo**); depois digite o novo saldo e aperte Enter (ou **Aplicar**); **Reverter** devolve o valor original |
+
+A busca usa a mesma lógica do
+[treinador externo](../treinador-pc/treinador.py): procura o nome no registro de
+228 bytes (`0xE4`), valida altura/peso e agrupa pelo ID mais comum. A varredura
+leva ~1 s e bloqueia o frame só nesse instante.
+
+O dinheiro da ML fica na memória como `int32` = saldo exibido ÷ 100
+(`$27.486.800` → `274868`). Como esse valor também aparece por coincidência em
+buffers de áudio e de pilha, a busca:
+
+1. ignora regiões de DLL/EXE (`MEM_IMAGE`), o próprio módulo e endereços
+   desalinhados;
+2. relê os candidatos ~0,5 s depois e **descarta os que já mudaram** — só sobra o
+   campo estável da carreira;
+3. antes de gravar, confere se o valor ainda é o mesmo da busca; se mudou (outra
+   tela, carregamento), **não grava** e registra no log.
 
 ## Compilar
 
@@ -90,8 +114,18 @@ EndScene hookado in-place (idx 42, orig=78A53DA0)
 WndProc subclassado (antigo=78AA33C0 novo=79ED1910)
 ImGui inicializado (hwnd=0005006C dev=042A6440)
 menu ABERTO (Insert)
-botao de teste acionado dentro do menu (1)
-menu fechado (Esc)
+busca de 'WARLISON': 16 ocorrencias
+registros validos: 2 (0.9 s)
+jogador escolhido: ID=00100000 copias=2 lesao=0
+lesao copia 0: 0 -> 44 (0xf9533a9a)
+lesao copia 1: 0 -> 44 (0xfc5018ca)
+lesao copia 0 revertida para 0 (0xf9533a9a)
+lesao copia 1 revertida para 0 (0xfc5018ca)
+dinheiro: alvo=274868 achados=2 (0.7 s)
+dinheiro 0x0af1f92c: descartado (valor instavel)
+dinheiro: 1 candidato(s) estavel(is) de 2
+dinheiro 0xfcf3c0b8: 274868 -> 999999
+dinheiro 0xfcf3c0b8 revertido para 274868
 ```
 
 Modo de segurança: crie um arquivo vazio `modmenu_nohook.txt` na pasta do jogo
@@ -127,8 +161,27 @@ ao normal na próxima execução.
   a posição absoluta do cursor não chega ao ImGui. O menu usa navegação por
   teclado (`NavEnableKeyboard`): setas, Enter e Esc.
 - **Subclasse de janela**: necessária para o ImGui receber teclas
-  (`ImGui_ImplWin32_WndProcHandler`).
+  (`ImGui_ImplWin32_WndProcHandler`). Com o menu aberto, o teclado é **modal**:
+  `WM_KEY*`/`WM_CHAR` não chegam ao jogo (nem para navegar nem para digitar).
+- **Campos numéricos**: `InputInt` vira três itens de foco (campo + `+`/`-`),
+  o que atrapalha a navegação por teclado; por isso o saldo usa `InputText` com
+  filtro decimal, e **Enter no campo** já dispara buscar/aplicar.
 - **`Direct3DCreate9` é chamado 3 vezes** pelo jogo; o patch do slot é
   idempotente (se o slot já aponta para o hook, nada é feito).
-- **Segurança**: nenhum recurso do jogo é alterado nesta etapa. O save não é
-  tocado. Tudo é reversível removendo os dois arquivos da pasta do jogo.
+- **Segurança**: nenhuma gravação acontece sem apertar um botão. Toda escrita é
+  registrada no log com o valor antigo, e as duas seções têm **Reverter**. O
+  save em disco não é tocado; se o jogo for encerrado sem salvar, nada muda.
+
+## Teste automático da busca
+
+Crie um arquivo vazio `modmenu_autoscan.txt` na pasta do jogo: ao abrir o menu,
+ele procura o nome que estiver no campo **Jogador** e registra o resultado no
+`modmenu.log` (útil para conferir se a memória da carreira já carregou):
+
+```
+menu ABERTO (Insert)
+autoscan: procurando 'WARLISON'
+busca de 'WARLISON': 19 ocorrencias
+registros validos: 2 (1.0 s)
+jogador escolhido: ID=00100000 copias=2 lesao=0
+```

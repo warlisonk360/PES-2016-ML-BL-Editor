@@ -110,14 +110,19 @@ do jogo aberto** (Bottles/Wine), para o que precisa valer na hora — hoje:
 Requer Python 3 + Tkinter (`python3-tk`). **Somente Linux.**
 Detalhes em `treinador-pc/README.md`.
 
-### 🧪 Mod menu injetado (experimental — Etapa 1)
+### 🧪 Mod menu injetado (experimental — Etapa 2)
 
 Em `mod-menu-pc/` há um **proxy `d3d9.dll`** que injeta um menu ImGui por cima
-do jogo (aberto com **Insert**), sem alterar nada do jogo nesta etapa. É a base
-para levar a edição ao vivo (lesão, atributos, dinheiro) para dentro da partida.
+do jogo (aberto com **Insert**). Na Etapa 2 ele também **lê e grava na memória do
+próprio jogo**, sempre por ação explícita e com botão de reverter:
+
+- **Jogador**: busca o registro pelo nome, mostra ID/lesão e permite curar,
+  lesionar (teste) ou reverter a lesão.
+- **Dinheiro da Liga Master**: busca o saldo exibido no jogo, aplica um novo
+  valor e reverte para o original.
 
 - Funciona com o **DXVK** (o proxy carrega o DXVK renomeado como `d3d9_real.dll`).
-- Navegação por **setas + Enter**; **Esc** fecha (o jogo prende o cursor).
+- Navegação por **setas/Tab + Enter**; **Esc** fecha (o jogo prende o cursor).
 - Instalação/desinstalação por `install.sh` / `uninstall.sh`.
 - Detalhes técnicos e diagnóstico em
   [`mod-menu-pc/README.md`](mod-menu-pc/README.md).
