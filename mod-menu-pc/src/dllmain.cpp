@@ -38,11 +38,14 @@ static const int VTBL_DEV_ENDSCENE = 42;        // IDirect3DDevice9
 
 static HMODULE g_self = nullptr;
 static char g_log_path[MAX_PATH] = {0};
+static char g_dir[MAX_PATH] = {0};
+static DWORD g_t0 = 0;
 static bool g_menu_open = false;
 static bool g_imgui_ready = false;
 static bool g_safe_mode = false;
 static bool g_autoscan = false;
 static bool g_autoscan_done = false;
+static bool g_sem_msg = false;    // pular a mensagem "Estabelecendo..."
 static HWND g_hwnd = nullptr;
 static IDirect3DDevice9* g_device = nullptr;
 
@@ -51,17 +54,21 @@ static IDirect3DDevice9* g_device = nullptr;
 // ---------------------------------------------------------------------------
 static void init_paths(HMODULE self) {
     g_self = self;
+    g_t0 = GetTickCount();
     char path[MAX_PATH] = {0};
     GetModuleFileNameA(self, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
     if (!slash) slash = strrchr(path, '/');
     if (slash) *(slash + 1) = 0;
+    snprintf(g_dir, sizeof(g_dir), "%s", path);
     snprintf(g_log_path, sizeof(g_log_path), "%smodmenu.log", path);
     char flag[MAX_PATH];
     snprintf(flag, sizeof(flag), "%smodmenu_nohook.txt", path);
     g_safe_mode = GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
     snprintf(flag, sizeof(flag), "%smodmenu_autoscan.txt", path);
     g_autoscan = GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
+    snprintf(flag, sizeof(flag), "%smodmenu_sem_comunicacoes.txt", path);
+    g_sem_msg = GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
 }
 
 static void logmsg(const char* fmt, ...) {
@@ -98,13 +105,32 @@ struct PlayerCopy {
     uintptr_t base;
     uint32_t id;
     uint8_t injury;
+    uint8_t height;
+    uint8_t weight;
 };
 
+// Estado por modo: ML e BL nao compartilham resultados de busca.
+struct PlayerState {
+    PlayerCopy copies[8];
+    uint8_t orig[8];
+    char name[32];
+    int count;
+    bool found;
+};
+
+enum ModoCarreira { MODO_ML = 0, MODO_BL = 1, MODO_COUNT = 2 };
+
+static const char* modo_nome(int modo) {
+    return modo == MODO_BL ? "BL" : "ML";
+}
+
 static char g_player_name[32] = "WARLISON";
-static PlayerCopy g_player_copies[8] = {};
-static uint8_t g_player_injury_orig[8] = {};
-static int g_player_copy_count = 0;
-static bool g_player_found = false;
+static PlayerState g_player[MODO_COUNT] = {};
+static int g_modo = MODO_ML;
+
+// Aba visivel: 0 = Master League, 1 = Vida Futebolistica, 2 = Comunicacoes.
+static int g_aba = 0;
+static bool g_msg_reiniciar = false;    // aviso: settings.dat so na abertura
 
 static int g_money_atual = 0;
 static int g_money_novo = 0;
@@ -149,7 +175,7 @@ static bool prot_writable(DWORD prot) {
 }
 
 static bool safe_read(uintptr_t addr, void* dst, size_t n) {
-    if (!addr || !dst || !n) return false;
+    if (!addr || !dst || !n || addr > UINTPTR_MAX - n) return false;
     MEMORY_BASIC_INFORMATION mbi;
     if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) return false;
     if (mbi.State != MEM_COMMIT || !prot_readable(mbi.Protect)) return false;
@@ -160,10 +186,12 @@ static bool safe_read(uintptr_t addr, void* dst, size_t n) {
 }
 
 static bool safe_write(uintptr_t addr, const void* src, size_t n) {
-    if (!addr || !src || !n) return false;
+    if (!addr || !src || !n || addr > UINTPTR_MAX - n) return false;
     MEMORY_BASIC_INFORMATION mbi;
     if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) return false;
     if (mbi.State != MEM_COMMIT || !prot_writable(mbi.Protect)) return false;
+    uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    if (addr + n > end) return false;
     memcpy((void*)addr, src, n);
     return true;
 }
@@ -216,18 +244,24 @@ static int scan_bytes(const void* needle, size_t nlen, bool somente_gravavel,
 
 // Acha as copias do registro do jogador e escolhe o grupo com o ID mais comum
 // (mesma heuristica do treinador externo).
-static void player_search() {
-    g_player_found = false;
-    g_player_copy_count = 0;
+static void player_search(PlayerState& st) {
+    st.found = false;
+    st.count = 0;
+    // Os nomes no jogo sao gravados em maiusculas; aceita o que o usuario
+    // digitar e normaliza o campo para maiusculas.
+    for (char* p = g_player_name; *p; ++p)
+        if (*p >= 'a' && *p <= 'z') *p = (char)(*p - 'a' + 'A');
     size_t nlen = strlen(g_player_name);
     if (nlen < 2) {
-        logmsg("busca: nome muito curto");
+        logmsg("[%s] busca: nome muito curto", modo_nome(g_modo));
         return;
     }
+    snprintf(st.name, sizeof(st.name), "%s", g_player_name);
     DWORD t0 = GetTickCount();
     uintptr_t hits[MAX_HITS];
     int nhits = scan_bytes(g_player_name, nlen, false, hits, MAX_HITS);
-    logmsg("busca de '%s': %d ocorrencias", g_player_name, nhits);
+    logmsg("[%s] busca de '%s': %d ocorrencias", modo_nome(g_modo),
+           g_player_name, nhits);
 
     PlayerCopy cand[MAX_HITS];
     int nc = 0;
@@ -249,9 +283,11 @@ static void player_search() {
         cand[nc].base = base;
         memcpy(&cand[nc].id, rec + PLAYER_ID_OFFSET, 4);
         cand[nc].injury = rec[PLAYER_INJURY_OFFSET];
+        cand[nc].height = altura;
+        cand[nc].weight = peso;
         ++nc;
     }
-    logmsg("registros validos: %d (%.1f s)", nc,
+    logmsg("[%s] registros validos: %d (%.1f s)", modo_nome(g_modo), nc,
            (GetTickCount() - t0) / 1000.0);
 
     if (nc == 0) return;
@@ -270,39 +306,85 @@ static void player_search() {
         }
     }
 
-    for (int i = 0; i < nc && g_player_copy_count < 8; ++i) {
+    for (int i = 0; i < nc && st.count < 8; ++i) {
         if (melhor_id && cand[i].id != melhor_id) continue;
-        g_player_copies[g_player_copy_count] =
-            {cand[i].base, cand[i].id, cand[i].injury};
-        g_player_injury_orig[g_player_copy_count] = cand[i].injury;
-        ++g_player_copy_count;
+        st.copies[st.count] = {cand[i].base, cand[i].id, cand[i].injury,
+                               cand[i].height, cand[i].weight};
+        st.orig[st.count] = cand[i].injury;
+        ++st.count;
     }
-    g_player_found = g_player_copy_count > 0;
-    if (g_player_found)
-        logmsg("jogador escolhido: ID=%08x copias=%d lesao=%d", melhor_id,
-               g_player_copy_count, g_player_copies[0].injury);
+    st.found = st.count > 0;
+    if (st.found)
+        logmsg("[%s] jogador escolhido: ID=%08x copias=%d lesao=%d",
+               modo_nome(g_modo), melhor_id, st.count, st.copies[0].injury);
 }
 
-static void player_write_injury(uint8_t valor) {
-    for (int i = 0; i < g_player_copy_count; ++i) {
-        uintptr_t addr = g_player_copies[i].base + PLAYER_INJURY_OFFSET;
-        uint8_t antes = 0;
-        if (!safe_read(addr, &antes, 1)) continue;
-        if (!safe_write(addr, &valor, 1)) continue;
-        logmsg("lesao copia %d: %u -> %u (0x%08x)", i, antes, valor,
-               (unsigned)addr);
-        g_player_copies[i].injury = valor;
+static bool player_copy_matches(const PlayerState& st, const PlayerCopy& copy,
+                                unsigned char* record = nullptr) {
+    unsigned char current[PLAYER_RECORD_SIZE];
+    if (!safe_read(copy.base, current, sizeof(current))) return false;
+
+    size_t name_len = strlen(st.name);
+    if (name_len < 2 || name_len >= PLAYER_NAME_LEN ||
+        memcmp(current + PLAYER_NAME_OFFSET, st.name, name_len) != 0 ||
+        current[PLAYER_NAME_OFFSET + name_len] != 0)
+        return false;
+
+    uint32_t id = 0;
+    memcpy(&id, current + PLAYER_ID_OFFSET, sizeof(id));
+    if (id != copy.id || current[PLAYER_HEIGHT_OFFSET] != copy.height ||
+        current[PLAYER_WEIGHT_OFFSET] != copy.weight)
+        return false;
+
+    if (record) memcpy(record, current, sizeof(current));
+    return true;
+}
+
+static void player_write_injury(PlayerState& st, uint8_t valor) {
+    for (int i = 0; i < st.count; ++i) {
+        uintptr_t addr = st.copies[i].base + PLAYER_INJURY_OFFSET;
+        unsigned char record[PLAYER_RECORD_SIZE];
+        if (!player_copy_matches(st, st.copies[i], record)) {
+            logmsg("[%s] lesao copia %d: registro mudou desde a busca; ignorado",
+                   modo_nome(g_modo), i);
+            continue;
+        }
+        uint8_t antes = record[PLAYER_INJURY_OFFSET];
+        if (!safe_write(addr, &valor, 1)) {
+            logmsg("[%s] lesao copia %d: endereco nao gravavel",
+                   modo_nome(g_modo), i);
+            continue;
+        }
+        logmsg("[%s] lesao copia %d: %u -> %u (0x%08x)", modo_nome(g_modo), i,
+               antes, valor, (unsigned)addr);
+        st.copies[i].injury = valor;
     }
 }
 
-static void player_revert_injury() {
-    for (int i = 0; i < g_player_copy_count; ++i) {
-        uintptr_t addr = g_player_copies[i].base + PLAYER_INJURY_OFFSET;
-        uint8_t valor = g_player_injury_orig[i];
-        if (!safe_write(addr, &valor, 1)) continue;
-        logmsg("lesao copia %d revertida para %u (0x%08x)", i, valor,
-               (unsigned)addr);
-        g_player_copies[i].injury = valor;
+static void player_revert_injury(PlayerState& st) {
+    for (int i = 0; i < st.count; ++i) {
+        uintptr_t addr = st.copies[i].base + PLAYER_INJURY_OFFSET;
+        uint8_t valor = st.orig[i];
+        unsigned char record[PLAYER_RECORD_SIZE];
+        if (!player_copy_matches(st, st.copies[i], record)) {
+            logmsg("[%s] lesao copia %d: registro mudou desde a busca; "
+                   "reversao ignorada", modo_nome(g_modo), i);
+            continue;
+        }
+        if (record[PLAYER_INJURY_OFFSET] != st.copies[i].injury) {
+            logmsg("[%s] lesao copia %d: valor atual mudou (%u, esperado %u); "
+                   "reversao ignorada", modo_nome(g_modo), i,
+                   record[PLAYER_INJURY_OFFSET], st.copies[i].injury);
+            continue;
+        }
+        if (!safe_write(addr, &valor, 1)) {
+            logmsg("[%s] lesao copia %d: endereco nao gravavel",
+                   modo_nome(g_modo), i);
+            continue;
+        }
+        logmsg("[%s] lesao copia %d revertida para %u (0x%08x)",
+               modo_nome(g_modo), i, valor, (unsigned)addr);
+        st.copies[i].injury = valor;
     }
 }
 
@@ -348,7 +430,7 @@ static void money_validate() {
     for (int i = 0; i < g_money_count; ++i) {
         int32_t agora = 0;
         if (!safe_read(g_money_addr[i], &agora, 4) ||
-            agora != g_money_antes[i]) {
+            agora != g_money_raw[i]) {
             logmsg("dinheiro 0x%08x: descartado (valor instavel)",
                    (unsigned)g_money_addr[i]);
             continue;
@@ -373,6 +455,10 @@ static int32_t money_current() {
 }
 
 static void money_apply() {
+    if (g_money_pending) {
+        logmsg("dinheiro: aguarde a validacao dos enderecos");
+        return;
+    }
     g_money_novo = atoi(g_money_novo_buf);
     if (g_money_novo <= 0) {
         logmsg("dinheiro: informe o novo saldo");
@@ -387,23 +473,47 @@ static void money_apply() {
                    (unsigned)addr);
             continue;
         }
-        // Se o valor mudou desde a busca (outra tela/carregamento), nao grava:
-        // o endereco pode ter sido reaproveitado por outra coisa.
-        if (antes != g_money_antes[i]) {
+        // So grava se o valor ainda for o ultimo que encontramos ou aplicamos.
+        if (antes != g_money_raw[i]) {
             logmsg("dinheiro 0x%08x: valor mudou (%d, esperado %d), nao gravei",
-                   (unsigned)addr, antes, g_money_antes[i]);
+                   (unsigned)addr, antes, g_money_raw[i]);
             continue;
         }
-        if (!safe_write(addr, &novo, 4)) continue;
+        if (!safe_write(addr, &novo, 4)) {
+            logmsg("dinheiro 0x%08x: endereco nao gravavel", (unsigned)addr);
+            continue;
+        }
         logmsg("dinheiro 0x%08x: %d -> %d", (unsigned)addr, antes, novo);
+        g_money_raw[i] = novo;
     }
 }
 
 static void money_revert() {
+    if (g_money_pending) {
+        logmsg("dinheiro: aguarde a validacao dos enderecos");
+        return;
+    }
     for (int i = 0; i < g_money_count; ++i) {
-        if (!safe_write(g_money_addr[i], &g_money_antes[i], 4)) continue;
+        int32_t atual = 0;
+        if (!safe_read(g_money_addr[i], &atual, 4)) {
+            logmsg("dinheiro 0x%08x: nao consegui ler para reverter",
+                   (unsigned)g_money_addr[i]);
+            continue;
+        }
+        if (atual != g_money_raw[i]) {
+            logmsg("dinheiro 0x%08x: valor mudou (%d, esperado %d), "
+                   "reversao ignorada", (unsigned)g_money_addr[i], atual,
+                   g_money_raw[i]);
+            continue;
+        }
+        if (!safe_write(g_money_addr[i], &g_money_antes[i], 4)) {
+            logmsg("dinheiro 0x%08x: endereco nao gravavel",
+                   (unsigned)g_money_addr[i]);
+            continue;
+        }
         logmsg("dinheiro 0x%08x revertido para %d", (unsigned)g_money_addr[i],
                g_money_antes[i]);
+        g_money_raw[i] = g_money_antes[i];
     }
 }
 
@@ -474,9 +584,449 @@ static HRESULT STDMETHODCALLTYPE hook_CreateDeviceEx(
     IDirect3D9Ex*, UINT, D3DDEVTYPE, HWND, DWORD,
     D3DPRESENT_PARAMETERS*, D3DDISPLAYMODEEX*, IDirect3DDevice9Ex**);
 
+// ---------------------------------------------------------------------------
+// Seletor de modo: Master League x Vida Futebolistica (Rumo ao Estrelato)
+// ---------------------------------------------------------------------------
+// Cada modo guarda seu proprio resultado de busca (g_player[g_modo]); so as
+// opcoes daquele tipo de carreira aparecem na tela.
+
+// Painel do jogador: busca o registro pelo nome e oferece lesao.
+// Usado pelos dois modos (no BL e o seu jogador; no ML, um jogador do elenco).
+static void ui_player_section(const char* titulo) {
+    PlayerState& st = g_player[g_modo];
+    ImGui::SeparatorText(titulo);
+    ImGui::SetNextItemWidth(190);
+    bool enter = ImGui::InputText("Nome do jogador", g_player_name,
+                                  sizeof(g_player_name),
+                                  ImGuiInputTextFlags_EnterReturnsTrue);
+    if (!enter && ImGui::IsItemDeactivatedAfterEdit()) enter = true;
+    if (enter) player_search(st);
+    ImGui::SameLine();
+    if (ImGui::Button("Procurar jogador")) player_search(st);
+    if (st.found) {
+        ImGui::Text("copias=%d   ID=%08X   lesao=%u", st.count,
+                    st.copies[0].id, st.copies[0].injury);
+        if (ImGui::Button("Curar lesao")) player_write_injury(st, 0);
+        ImGui::SameLine();
+        if (ImGui::Button("Lesionar (teste)")) player_write_injury(st, 44);
+        ImGui::SameLine();
+        if (ImGui::Button("Reverter lesao")) player_revert_injury(st);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(leitura original guardada)");
+    } else {
+        ImGui::TextDisabled("Digite o nome exato do jogador e procure.");
+    }
+}
+
+// Dinheiro do clube: so existe na Master League.
+static void ui_money_section() {
+    ImGui::SeparatorText("Dinheiro da Liga Master");
+    ImGui::TextDisabled(
+        "Digite o saldo do jogo (ex.: 27486800) e confirme com Enter.");
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("Saldo atual", g_money_atual_buf,
+                     sizeof(g_money_atual_buf),
+                     ImGuiInputTextFlags_CharsDecimal);
+    if (ImGui::IsItemDeactivatedAfterEdit()) money_search();
+    ImGui::SameLine();
+    if (ImGui::Button("Procurar saldo")) money_search();
+    if (g_money_found) {
+        ImGui::Text("enderecos=%d   na memoria=%.0f", g_money_count,
+                    money_current() * (double)MONEY_SCALE);
+        ImGui::SetNextItemWidth(200);
+        ImGui::InputText("Novo saldo", g_money_novo_buf,
+                         sizeof(g_money_novo_buf),
+                         ImGuiInputTextFlags_CharsDecimal);
+        if (ImGui::IsItemDeactivatedAfterEdit()) money_apply();
+        ImGui::SameLine();
+        if (ImGui::Button("Aplicar")) money_apply();
+        ImGui::SameLine();
+        if (ImGui::Button("Reverter")) money_revert();
+    } else {
+        ImGui::TextDisabled("Informe o saldo que aparece no jogo e procure.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// settings.dat: porta UDP manual
+// ---------------------------------------------------------------------------
+// O Settings.exe grava o arquivo como um dump cru do struct SettingsData (360
+// bytes, magic "WECF").  O "UDP automatico" e o bit 5 do int32 em 0x08 e a
+// porta fica no int32 em 0x24 (padrao 5739, ignorado quando o automatico esta
+// ligado).  Com a porta manual em 0 o jogo nao faz o teste de conexao e a
+// mensagem "Estabelecendo comunicacoes" nao segura a abertura.
+static const long SETTINGS_TAM = 360;
+static const uint32_t SETTINGS_FLAGS_OFF = 0x08;
+static const uint32_t SETTINGS_PORTA_OFF = 0x24;
+static const uint32_t SETTINGS_FLAG_AUTO_UDP = 0x20;
+static const uint32_t SETTINGS_PORTA_PADRAO = 5739;
+
+struct SettingsInfo {
+    bool ok;
+    uint32_t flags;
+    uint32_t porta;
+};
+
+static bool settings_path(char* destino, size_t n) {
+    char perfil[MAX_PATH] = {0};
+    if (!GetEnvironmentVariableA("USERPROFILE", perfil, MAX_PATH)) return false;
+    snprintf(destino, n,
+             "%s\\Documents\\KONAMI\\Pro Evolution Soccer 2016\\settings.dat",
+             perfil);
+    return true;
+}
+
+static SettingsInfo settings_ler() {
+    SettingsInfo info = {false, 0, 0};
+    char caminho[MAX_PATH];
+    if (!settings_path(caminho, sizeof(caminho))) return info;
+    FILE* f = fopen(caminho, "rb");
+    if (!f) return info;
+    unsigned char buf[SETTINGS_TAM];
+    size_t lidos = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (lidos != sizeof(buf)) return info;
+    if (memcmp(buf, "WECF", 4) != 0) return info;
+    memcpy(&info.flags, buf + SETTINGS_FLAGS_OFF, 4);
+    memcpy(&info.porta, buf + SETTINGS_PORTA_OFF, 4);
+    info.ok = true;
+    return info;
+}
+
+static bool settings_gravar(uint32_t flags, uint32_t porta) {
+    char caminho[MAX_PATH];
+    if (!settings_path(caminho, sizeof(caminho))) return false;
+    FILE* f = fopen(caminho, "r+b");
+    if (!f) return false;
+    unsigned char buf[SETTINGS_TAM];
+    size_t lidos = fread(buf, 1, sizeof(buf), f);
+    if (lidos != sizeof(buf) || memcmp(buf, "WECF", 4) != 0) {
+        fclose(f);
+        return false;
+    }
+    memcpy(buf + SETTINGS_FLAGS_OFF, &flags, 4);
+    memcpy(buf + SETTINGS_PORTA_OFF, &porta, 4);
+    fseek(f, 0, SEEK_SET);
+    bool ok = fwrite(buf, 1, sizeof(buf), f) == sizeof(buf);
+    fclose(f);
+    logmsg("settings: flags=0x%02x porta=%u (%s)", flags, porta, caminho);
+    return ok;
+}
+
+static void settings_info_log(const SettingsInfo& info) {
+    if (!info.ok) {
+        logmsg("settings: settings.dat nao encontrado ou invalido");
+        return;
+    }
+    logmsg("settings: auto_udp=%d porta=%u",
+           (info.flags & SETTINGS_FLAG_AUTO_UDP) ? 1 : 0, info.porta);
+}
+
+// Aplicado no carregamento da dll, antes de o jogo ler o settings.dat.  O
+// marcador ".aplicado" lembra que foi o mod quem alterou o arquivo, para o
+// "reverter" nao mexer numa configuracao que o usuario ajustou na mao.
+static void sem_msg_aplicar() {
+    char marcador[MAX_PATH];
+    char aplicado[MAX_PATH];
+    snprintf(marcador, sizeof(marcador), "%smodmenu_sem_comunicacoes.txt",
+             g_dir);
+    snprintf(aplicado, sizeof(aplicado), "%smodmenu_sem_comunicacoes.aplicado",
+             g_dir);
+    bool quer = GetFileAttributesA(marcador) != INVALID_FILE_ATTRIBUTES;
+    bool aplicado_antes = GetFileAttributesA(aplicado) != INVALID_FILE_ATTRIBUTES;
+    SettingsInfo info = settings_ler();
+    settings_info_log(info);
+
+    if (quer) {
+        if (info.ok && (info.flags & SETTINGS_FLAG_AUTO_UDP) == 0 &&
+            info.porta == 0) {
+            // Ja esta como o mod quer (talvez o jogo tenha salvo assim).
+            if (!aplicado_antes) {
+                FILE* f = fopen(aplicado, "wb");
+                if (f) fclose(f);
+            }
+            return;
+        }
+        if (!info.ok) return;
+        if (settings_gravar(info.flags & ~SETTINGS_FLAG_AUTO_UDP, 0)) {
+            FILE* f = fopen(aplicado, "wb");
+            if (f) fclose(f);
+            logmsg("settings: mensagem de comunicacoes desativada");
+        }
+    } else if (aplicado_antes) {
+        // Desfaz apenas o que o mod alterou: volta o automatico e a porta
+        // padrao (5739), sem tocar no resto do arquivo.
+        if (info.ok &&
+            settings_gravar(info.flags | SETTINGS_FLAG_AUTO_UDP,
+                            SETTINGS_PORTA_PADRAO)) {
+            DeleteFileA(aplicado);
+            logmsg("settings: mensagem de comunicacoes restaurada");
+        }
+    }
+}
+
+static void sem_msg_set(bool ligado) {
+    char marcador[MAX_PATH];
+    snprintf(marcador, sizeof(marcador), "%smodmenu_sem_comunicacoes.txt",
+             g_dir);
+    if (ligado) {
+        FILE* f = fopen(marcador, "wb");
+        if (f) fclose(f);
+    } else {
+        DeleteFileA(marcador);
+    }
+    g_sem_msg = ligado;
+    g_msg_reiniciar = true;
+    logmsg("settings: opcao de abertura %s (%s)", ligado ? "LIGADA" : "desligada",
+           marcador);
+}
+
+static void ui_comunicacoes_section() {
+    ImGui::SeparatorText("Abertura mais rapida (recomendado)");
+    ImGui::TextWrapped(
+        "Na abertura o jogo faz um teste de conexao (UDP) com os servidores "
+        "online da Konami e a mensagem \"Estabelecendo comunicacoes\" fica "
+        "esperando esse teste por 10 a 15 segundos.  No Settings.exe isso se "
+        "resolve na aba Online: desmarcar \"Automatico\" e por porta 0.  Este "
+        "botao faz o mesmo no settings.dat.");
+    ImGui::Spacing();
+
+    static SettingsInfo info = {false, 0, 0};
+    static DWORD lido_em = 0;
+    if (GetTickCount() - lido_em > 500) {
+        info = settings_ler();
+        lido_em = GetTickCount();
+    }
+    if (!info.ok) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f),
+                           "settings.dat nao encontrado ou invalido.");
+    } else if (info.flags & SETTINGS_FLAG_AUTO_UDP) {
+        ImGui::TextDisabled("Porta UDP automatica (o jogo espera o teste).");
+    } else {
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f),
+                           "Porta UDP manual: %u (sem espera do teste).",
+                           info.porta);
+    }
+    if (ImGui::Button(g_sem_msg
+                          ? "Voltar a espera normal (reverter)"
+                          : "Encurtar a mensagem \"Estabelecendo comunicacoes\""))
+        sem_msg_set(!g_sem_msg);
+    if (g_msg_reiniciar) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
+                           "Feche e abra o jogo.  O settings.dat so e lido na "
+                           "abertura.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Teclado modal: o jogo le teclas por DirectInput (polling), que nao passa
+// pelo WndProc. Interceptamos a criacao dos objetos do jogo e zeramos o estado
+// do teclado no GetDeviceState enquanto o menu esta aberto.
+// ---------------------------------------------------------------------------
+typedef HRESULT(STDMETHODCALLTYPE* DiGetDeviceStateFn)(void*, DWORD, void*);
+typedef HRESULT(STDMETHODCALLTYPE* DiCreateDeviceFn)(void*, const void*,
+                                                     void**, void*);
+typedef HRESULT(WINAPI* Di8CreateFn)(HINSTANCE, DWORD, const void*, void**,
+                                     void*);
+typedef HHOOK(WINAPI* SetWindowsHookExWFn)(int, HOOKPROC, HINSTANCE, DWORD);
+
+struct DiVtable {
+    void** vt;
+    DiGetDeviceStateFn get_state;
+};
+static DiVtable g_di_vt[4] = {};
+static int g_di_vt_count = 0;
+static DiCreateDeviceFn g_create_device_orig = nullptr;
+static Di8CreateFn g_di8_create_real = nullptr;
+
+// O jogo instala um hook global de teclado (WH_KEYBOARD_LL). Trocamos o
+// procedimento dele pelo nosso: com o menu aberto, as teclas nao chegam ao
+// jogo; com o menu fechado, repassamos para o procedimento original.
+static SetWindowsHookExWFn g_set_hook_orig = nullptr;
+static HOOKPROC g_jogo_kbd_proc = nullptr;
+static int g_jogo_kbd_tipo = 0;
+
+static LRESULT CALLBACK hook_teclado_jogo(int code, WPARAM wp, LPARAM lp) {
+    if (g_menu_open) return CallNextHookEx(nullptr, code, wp, lp);
+    if (g_jogo_kbd_proc) return g_jogo_kbd_proc(code, wp, lp);
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+static HHOOK WINAPI hook_set_windows_hook(int id, HOOKPROC proc, HINSTANCE h,
+                                          DWORD tid) {
+    if (!g_set_hook_orig) return nullptr;
+    if (proc && (id == WH_KEYBOARD_LL || id == WH_KEYBOARD)) {
+        g_jogo_kbd_proc = proc;
+        g_jogo_kbd_tipo = id;
+        logmsg("teclado: hook do jogo interceptado (tipo=%d)", id);
+        return g_set_hook_orig(id, hook_teclado_jogo, h, tid);
+    }
+    return g_set_hook_orig(id, proc, h, tid);
+}
+
+static bool pointer_in_module(const void* p, HMODULE h) {
+    if (!h || !p) return false;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)h;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    const IMAGE_NT_HEADERS* nt =
+        (const IMAGE_NT_HEADERS*)((const BYTE*)h + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    uintptr_t base = (uintptr_t)h;
+    uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+    uintptr_t a = (uintptr_t)p;
+    return a >= base && a < end;
+}
+
+static void patch_slot(void** vt, int idx, void* fn) {
+    DWORD old = 0;
+    if (VirtualProtect(&vt[idx], sizeof(void*), PAGE_READWRITE, &old)) {
+        vt[idx] = fn;
+        VirtualProtect(&vt[idx], sizeof(void*), old, &old);
+    }
+}
+
+static HRESULT STDMETHODCALLTYPE hook_di_get_state(void* self, DWORD cb,
+                                                   void* data) {
+    void** vt = self ? *(void***)self : nullptr;
+    DiGetDeviceStateFn orig = nullptr;
+    for (int i = 0; i < g_di_vt_count; ++i)
+        if (g_di_vt[i].vt == vt) orig = g_di_vt[i].get_state;
+    if (!orig) return E_FAIL;
+    HRESULT hr = orig(self, cb, data);
+    // Teclado tem 256 bytes de estado; mouse/joystick tem outros tamanhos.
+    if (SUCCEEDED(hr) && g_menu_open && data && cb == 256)
+        memset(data, 0, 256);
+    return hr;
+}
+
+// Chamado para cada dispositivo criado pelo jogo. A vtable e compartilhada,
+// entao basta interceptar uma vez por vtable.
+static void hook_device(void* dev) {
+    if (!dev) return;
+    void** vt = *(void***)dev;
+    for (int i = 0; i < g_di_vt_count; ++i)
+        if (g_di_vt[i].vt == vt) return;
+    HMODULE h = GetModuleHandleA("dinput8.dll");
+    void* orig = vt[9];
+    if (!pointer_in_module(orig, h)) {
+        logmsg("teclado: GetDeviceState inesperado (%p); sem bloqueio", orig);
+        return;
+    }
+    if (g_di_vt_count >= 4) return;
+    g_di_vt[g_di_vt_count].vt = vt;
+    g_di_vt[g_di_vt_count].get_state = (DiGetDeviceStateFn)orig;
+    ++g_di_vt_count;
+    patch_slot(vt, 9, (void*)hook_di_get_state);
+    logmsg("teclado: GetDeviceState interceptado (vtable=%p)", (void*)vt);
+}
+
+static HRESULT STDMETHODCALLTYPE hook_di_create_device(void* self,
+                                                       const void* guid,
+                                                       void** out, void* outer) {
+    if (!g_create_device_orig) return E_FAIL;
+    HRESULT hr = g_create_device_orig(self, guid, out, outer);
+    if (SUCCEEDED(hr) && out && *out) hook_device(*out);
+    return hr;
+}
+
+// Wrapper do DirectInput8Create (patch na IAT do executavel).
+static HRESULT WINAPI hook_di8_create(HINSTANCE hinst, DWORD ver,
+                                      const void* iid, void** out, void* outer) {
+    if (!g_di8_create_real) {
+        HMODULE h = LoadLibraryA("dinput8.dll");
+        if (!h) return E_FAIL;
+        g_di8_create_real =
+            (Di8CreateFn)GetProcAddress(h, "DirectInput8Create");
+        if (!g_di8_create_real) return E_FAIL;
+    }
+    HRESULT hr = g_di8_create_real(hinst, ver, iid, out, outer);
+    if (FAILED(hr) || !out || !*out) return hr;
+    HMODULE h = GetModuleHandleA("dinput8.dll");
+    void** vt = *(void***)*out;
+    void* orig = vt[3];   // IDirectInput8: CreateDevice (indice 3)
+    if (!pointer_in_module(orig, h)) {
+        logmsg("teclado: CreateDevice inesperado (%p); sem bloqueio", orig);
+        return hr;
+    }
+    if (!g_create_device_orig) {
+        g_create_device_orig = (DiCreateDeviceFn)orig;
+        patch_slot(vt, 3, (void*)hook_di_create_device);
+        logmsg("teclado: DirectInput interceptado");
+    }
+    return hr;
+}
+
+// Troca o ponteiro de uma funcao importada na IAT do executavel.
+static void* patch_iat(HMODULE exe, const char* dll_name, const char* func,
+                       void* hook) {
+    if (!exe) return nullptr;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)exe;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+    const IMAGE_NT_HEADERS* nt =
+        (const IMAGE_NT_HEADERS*)((const BYTE*)exe + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
+    const IMAGE_DATA_DIRECTORY& dir =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return nullptr;
+    IMAGE_IMPORT_DESCRIPTOR* imp =
+        (IMAGE_IMPORT_DESCRIPTOR*)((BYTE*)exe + dir.VirtualAddress);
+    for (; imp->Name; ++imp) {
+        const char* nome = (const char*)((BYTE*)exe + imp->Name);
+        if (_stricmp(nome, dll_name) != 0) continue;
+        IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(
+            (BYTE*)exe + (imp->OriginalFirstThunk ? imp->OriginalFirstThunk
+                                                  : imp->FirstThunk));
+        IMAGE_THUNK_DATA* iat =
+            (IMAGE_THUNK_DATA*)((BYTE*)exe + imp->FirstThunk);
+        for (; thunk->u1.Function; ++thunk, ++iat) {
+            if (IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal)) continue;
+            const IMAGE_IMPORT_BY_NAME* ibn =
+                (const IMAGE_IMPORT_BY_NAME*)((BYTE*)exe +
+                                              thunk->u1.AddressOfData);
+            if (strcmp((const char*)ibn->Name, func) != 0) continue;
+            DWORD old = 0;
+            void* original = (void*)iat->u1.Function;
+            if (VirtualProtect(&iat->u1.Function, sizeof(void*),
+                               PAGE_READWRITE, &old)) {
+                iat->u1.Function = (ULONG_PTR)hook;
+                VirtualProtect(&iat->u1.Function, sizeof(void*), old, &old);
+                return original;
+            }
+            return nullptr;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
+// Instalado no DllMain: o jogo ainda nao criou os dispositivos de entrada.
+static void install_input_hooks() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    HMODULE exe = GetModuleHandleA(nullptr);
+    void* orig =
+        patch_iat(exe, "DINPUT8.dll", "DirectInput8Create", (void*)hook_di8_create);
+    if (orig) {
+        g_di8_create_real = (Di8CreateFn)orig;
+        logmsg("teclado: DirectInput8Create interceptado");
+    } else {
+        logmsg("teclado: DirectInput8Create nao esta na IAT do jogo");
+    }
+    void* sethook = patch_iat(exe, "USER32.dll", "SetWindowsHookExW",
+                              (void*)hook_set_windows_hook);
+    if (sethook) {
+        g_set_hook_orig = (SetWindowsHookExWFn)sethook;
+        logmsg("teclado: SetWindowsHookExW interceptado");
+    } else {
+        logmsg("teclado: SetWindowsHookExW nao esta na IAT do jogo");
+    }
+}
+
+
 // Subclasse da janela: sem isto o ImGui nao recebe mouse/teclado.
 static WNDPROC g_orig_wndproc = nullptr;
-
 static LRESULT CALLBACK hook_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (!g_menu_open)
         return CallWindowProcW(g_orig_wndproc, hwnd, msg, wp, lp);
@@ -486,6 +1036,16 @@ static LRESULT CALLBACK hook_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         g_menu_open = false;
         logmsg("menu fechado (Esc)");
         return 1;
+    }
+
+    // Raw input nao passa pelo bloqueio de mensagens: com o menu aberto,
+    // esvazia a fila para o jogo nao receber as teclas.
+    if (msg == WM_INPUT) {
+        BYTE raw[256];
+        UINT tam = sizeof(raw);
+        GetRawInputData((HRAWINPUT)lp, RID_INPUT, raw, &tam,
+                        sizeof(RAWINPUTHEADER));
+        return 0;
     }
 
     // Menu aberto = modal: o teclado vai so para o ImGui, nunca para o jogo.
@@ -541,7 +1101,7 @@ static HRESULT STDMETHODCALLTYPE hook_EndScene(IDirect3DDevice9* dev) {
         if (g_menu_open && g_autoscan && !g_autoscan_done) {
             g_autoscan_done = true;
             logmsg("autoscan: procurando '%s'", g_player_name);
-            player_search();
+            player_search(g_player[g_modo]);
         }
     }
     antes = agora;
@@ -554,61 +1114,48 @@ static HRESULT STDMETHODCALLTYPE hook_EndScene(IDirect3DDevice9* dev) {
         money_validate();
 
         ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(660, 520), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(660, 430), ImGuiCond_FirstUseEver);
         ImGui::Begin("PES 2016 - Mod Menu (injetado)");
         ImGui::Text("Device: %p   HWND: %p", (void*)dev, (void*)g_hwnd);
         ImGui::TextDisabled(
             "Insert abre/fecha. Setas + Enter navegam. Esc fecha.");
-        ImGui::SeparatorText("Etapa 2: memoria ao vivo");
 
-        // ---- Jogador / lesao -------------------------------------------------
-        ImGui::SetNextItemWidth(190);
-        ImGui::InputText("Nome do jogador", g_player_name,
-                         sizeof(g_player_name));
-        ImGui::SameLine();
-        if (ImGui::Button("Procurar jogador")) player_search();
-        if (g_player_found) {
-            ImGui::Text("copias=%d   ID=%08X   lesao=%u",
-                        g_player_copy_count, g_player_copies[0].id,
-                        g_player_copies[0].injury);
-            if (ImGui::Button("Curar lesao")) player_write_injury(0);
-            ImGui::SameLine();
-            if (ImGui::Button("Lesionar (teste)")) player_write_injury(44);
-            ImGui::SameLine();
-            if (ImGui::Button("Reverter lesao")) player_revert_injury();
-            ImGui::SameLine();
-            ImGui::TextDisabled("(leitura original guardada)");
-        } else {
-            ImGui::TextDisabled(
-                "Digite o nome exato do jogador e procure.");
+        // ---- Seletor de aba -------------------------------------------------
+        // Cada aba mostra so as opcoes daquele assunto.
+        ImGui::Separator();
+        if (ImGui::Selectable("Master League", g_aba == 0, 0, ImVec2(150, 0))) {
+            g_aba = 0;
+            g_modo = MODO_ML;
         }
-
-        // ---- Dinheiro da Liga Master ----------------------------------------
-        ImGui::SeparatorText("Dinheiro da Liga Master");
-        ImGui::TextDisabled(
-            "Digite o saldo do jogo (ex.: 27486800) e confirme com Enter.");
-        ImGui::SetNextItemWidth(200);
-        ImGui::InputText("Saldo atual", g_money_atual_buf,
-                         sizeof(g_money_atual_buf),
-                         ImGuiInputTextFlags_CharsDecimal);
-        if (ImGui::IsItemDeactivatedAfterEdit()) money_search();
         ImGui::SameLine();
-        if (ImGui::Button("Procurar saldo")) money_search();
-        if (g_money_found) {
-            ImGui::Text("enderecos=%d   na memoria=%.0f", g_money_count,
-                        money_current() * (double)MONEY_SCALE);
-            ImGui::SetNextItemWidth(200);
-            ImGui::InputText("Novo saldo", g_money_novo_buf,
-                             sizeof(g_money_novo_buf),
-                             ImGuiInputTextFlags_CharsDecimal);
-            if (ImGui::IsItemDeactivatedAfterEdit()) money_apply();
+        if (ImGui::Selectable("Vida Futebolistica", g_aba == 1, 0,
+                              ImVec2(175, 0))) {
+            g_aba = 1;
+            g_modo = MODO_BL;
+        }
+        ImGui::SameLine();
+        if (ImGui::Selectable("Comunicacoes", g_aba == 2, 0, ImVec2(140, 0)))
+            g_aba = 2;
+        if (g_aba != 2) {
             ImGui::SameLine();
-            if (ImGui::Button("Aplicar")) money_apply();
-            ImGui::SameLine();
-            if (ImGui::Button("Reverter")) money_revert();
-        } else {
+            ImGui::TextDisabled(g_aba == 0 ? "(Liga Master)"
+                                           : "(Rumo ao Estrelato)");
+        }
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (g_aba == 0) {
+            ui_player_section("Jogador do elenco");
+            ui_money_section();
+        } else if (g_aba == 1) {
+            ui_player_section("Seu jogador");
+            ImGui::Spacing();
             ImGui::TextDisabled(
-                "Informe o saldo que aparece no jogo e procure.");
+                "No Vida Futebolistica nao existe dinheiro de clube:");
+            ImGui::TextDisabled(
+                "use as opcoes do jogador acima.");
+        } else {
+            ui_comunicacoes_section();
         }
 
         ImGui::Separator();
@@ -749,6 +1296,12 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(hinst);
         logmsg("=== d3d9 proxy (mod menu) anexado ao jogo (safe_mode=%d) ===",
                g_safe_mode ? 1 : 0);
+        sem_msg_aplicar();
+        if (g_safe_mode) {
+            logmsg("MODO SEGURO: hooks de Direct3D e entrada nao instalados");
+        } else {
+            install_input_hooks();
+        }
     }
     return TRUE;
 }

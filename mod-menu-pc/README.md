@@ -5,7 +5,11 @@ Menu desenhado **por cima do jogo** (ImGui via Direct3D 9), aberto com
 
 > Estado atual: **Etapa 2** — além de provar a injeção, o menu lê e grava na
 > memória do próprio jogo (cura de lesão e dinheiro da Liga Master), sempre com
-> ação explícita e opção de reverter. O save em disco não é tocado.
+> ação explícita e opção de reverter. Na Master League ficam as opções do elenco
+> e o dinheiro do clube; no Vida Futebolística fica o seu jogador. O terceiro
+> guia, **Comunicações**, tira a espera da mensagem "Estabelecendo
+> comunicações" da abertura (ajuste no `settings.dat`, com reverter). Os saves
+> de carreira não são tocados.
 
 ## Como funciona
 
@@ -30,11 +34,38 @@ PES2016.exe
 
 ## O que o menu faz
 
-| Seção | Ação |
-|---|---|
-| **Jogador** | digite o nome exato, **Procurar jogador** localiza o registro na memória e mostra as cópias, o ID e a lesão atual |
-| | **Curar lesão** grava `0`; **Lesionar (teste)** grava `44`; **Reverter lesão** volta ao valor lido |
-| **Dinheiro da Liga Master** | digite o saldo que aparece em **Negociação → Fundos do time** e aperte Enter (ou **Procurar saldo**); depois digite o novo saldo e aperte Enter (ou **Aplicar**); **Reverter** devolve o valor original |
+No topo do menu há um seletor com três guias — **Master League**,
+**Vida Futebolística** (Rumo ao Estrelato) e **Comunicações**. Cada modo de
+carreira mostra apenas as opções daquele tipo e guarda seu próprio resultado de
+busca (a busca feita na ML não aparece na aba BL, e vice-versa).
+
+| Modo | Seção | Ação |
+|---|---|---|
+| **Master League** | **Jogador do elenco** | digite o nome (aceita minúsculas), **Procurar jogador** (ou Enter no campo) localiza o registro na memória e mostra as cópias, o ID e a lesão atual |
+| | | **Curar lesão** grava `0`; **Lesionar (teste)** grava `44`; **Reverter lesão** volta ao valor lido |
+| | **Dinheiro da Liga Master** | digite o saldo que aparece em **Negociação → Fundos do time** e aperte Enter (ou **Procurar saldo**); depois digite o novo saldo e aperte Enter (ou **Aplicar**); **Reverter** devolve o valor original |
+| **Vida Futebolística** | **Seu jogador** | as mesmas opções de lesão, aplicadas ao registro do seu jogador no BL |
+| **Comunicações** | **Abertura mais rápida** | **Encurtar a mensagem "Estabelecendo comunicações"** desmarca a porta UDP automática e zera a porta no `settings.dat`; **Voltar à espera normal** reverte para automático/5739 |
+
+O BL não tem dinheiro de clube, então essa seção não aparece nesse modo.
+
+### Comunicações: por que a abertura demora
+
+O `Settings.exe` grava o `settings.dat` como um **dump cru de 360 bytes** do
+struct `SettingsData` (magic `WECF`, versão `0x67`). O campo *UDP Port* fica em
+`0x24` e a opção *Automático* é o **bit 5** do `int32` em `0x08`. Com o
+automático ligado o jogo usa a porta padrão **5739** e, na abertura, faz um
+teste de conexão UDP que segura a mensagem "Estabelecendo comunicações" por
+10–15 s.
+
+Desmarcar *Automático* e pôr porta `0` (o que o menu faz) dispensa esse teste:
+o jogo nem chega a abrir o socket e vai direto ao menu. A mensagem pode ainda
+aparecer por poucos segundos durante o carregamento, mas **não segura mais a
+abertura**. O ajuste é aplicado no carregamento da DLL, **antes** de o jogo ler
+o arquivo — por isso o aviso de fechar e abrir o jogo. A opção fica gravada em
+`modmenu_sem_comunicacoes.txt`;
+um marcador `modmenu_sem_comunicacoes.aplicado` garante que o **reverter** só
+desfaça o que o mod alterou, sem mexer numa configuração ajustada à mão.
 
 A busca usa a mesma lógica do
 [treinador externo](../treinador-pc/treinador.py): procura o nome no registro de
@@ -114,13 +145,16 @@ EndScene hookado in-place (idx 42, orig=78A53DA0)
 WndProc subclassado (antigo=78AA33C0 novo=79ED1910)
 ImGui inicializado (hwnd=0005006C dev=042A6440)
 menu ABERTO (Insert)
-busca de 'WARLISON': 16 ocorrencias
-registros validos: 2 (0.9 s)
-jogador escolhido: ID=00100000 copias=2 lesao=0
-lesao copia 0: 0 -> 44 (0xf9533a9a)
-lesao copia 1: 0 -> 44 (0xfc5018ca)
-lesao copia 0 revertida para 0 (0xf9533a9a)
-lesao copia 1 revertida para 0 (0xfc5018ca)
+teclado: DirectInput8Create interceptado
+teclado: DirectInput interceptado
+teclado: GetDeviceState interceptado (vtable=7A59F540)
+[ML] busca de 'WARLISON': 18 ocorrencias
+[ML] registros validos: 2 (1.5 s)
+[ML] jogador escolhido: ID=00100000 copias=2 lesao=0
+[ML] lesao copia 0: 0 -> 44 (0xf9533a9a)
+[ML] lesao copia 1: 0 -> 44 (0xfc5018ca)
+[ML] lesao copia 0 revertida para 0 (0xf9533a9a)
+[ML] lesao copia 1 revertida para 0 (0xfc5018ca)
 dinheiro: alvo=274868 achados=2 (0.7 s)
 dinheiro 0x0af1f92c: descartado (valor instavel)
 dinheiro: 1 candidato(s) estavel(is) de 2
@@ -134,6 +168,7 @@ o problema é o hook e não o proxy:
 
 ```
 === d3d9 proxy (mod menu) anexado ao jogo (safe_mode=1) ===
+MODO SEGURO: hooks de Direct3D e entrada nao instalados
 Direct3DCreate9(32) chamado
 MODO SEGURO: vtable nao foi hookada
 ```
@@ -160,17 +195,37 @@ ao normal na próxima execução.
 - **Mouse**: o jogo mantém o ponteiro preso/centralizado no X11 (grab), então
   a posição absoluta do cursor não chega ao ImGui. O menu usa navegação por
   teclado (`NavEnableKeyboard`): setas, Enter e Esc.
-- **Subclasse de janela**: necessária para o ImGui receber teclas
-  (`ImGui_ImplWin32_WndProcHandler`). Com o menu aberto, o teclado é **modal**:
-  `WM_KEY*`/`WM_CHAR` não chegam ao jogo (nem para navegar nem para digitar).
+- **Teclado modal**: o menu recebe as teclas pela subclasse da janela
+  (`ImGui_ImplWin32_WndProcHandler`). O jogo não lê o teclado por mensagens: ele
+  usa o **DirectInput8**, então com o menu aberto o proxy intercepta a criação
+  dos dispositivos e **zera o estado do teclado** em `IDirectInputDevice8::
+  GetDeviceState` (256 bytes); `WM_INPUT` também é consumido. Assim as teclas
+  navegam o menu e **não chegam ao jogo**. Sem o menu, o estado passa direto.
 - **Campos numéricos**: `InputInt` vira três itens de foco (campo + `+`/`-`),
   o que atrapalha a navegação por teclado; por isso o saldo usa `InputText` com
-  filtro decimal, e **Enter no campo** já dispara buscar/aplicar.
+  filtro decimal, e **Enter no campo** já dispara buscar/aplicar. O campo do
+  nome também busca com Enter e converte o texto para maiúsculas (os registros
+  do jogo são em maiúsculas).
 - **`Direct3DCreate9` é chamado 3 vezes** pelo jogo; o patch do slot é
   idempotente (se o slot já aponta para o hook, nada é feito).
+- **`settings.dat`**: o menu não reimplementa o formato — ele só lê os 360
+  bytes, confere o magic `WECF` e altera flags (`0x08`) e porta (`0x24`). Se o
+  arquivo estiver inválido ou ausente, o botão não faz nada e o log registra.
+  Como o jogo reescreve o arquivo ao fechar, o ajuste é feito no `DllMain`, e
+  não no clique. Valores padrão confirmados em `SettingsData::InitDefault`:
+  flags `0x30` (automático ligado) e porta `5739`.
+- **Sem hooks de rede**: a abertura é resolvida só pelo `settings.dat`. Medições
+  com a opção ligada mostraram **zero** chamadas de `socket`/`bind`/`send`/
+  `recv` no boot e o menu principal em ~25 s (antes 45–63 s). A mensagem ainda
+  pisca por poucos segundos durante o carregamento, mas não segura mais a
+  abertura.
 - **Segurança**: nenhuma gravação acontece sem apertar um botão. Toda escrita é
-  registrada no log com o valor antigo, e as duas seções têm **Reverter**. O
-  save em disco não é tocado; se o jogo for encerrado sem salvar, nada muda.
+  registrada no log com o valor antigo. Antes de alterar a lesão, o menu
+  revalida nome, ID, altura e peso do registro; antes de reverter, também
+  confirma que o valor continua sendo o último aplicado pelo menu. O dinheiro
+  segue a mesma validação e pode receber várias aplicações antes de reverter
+  ao valor original. O save em disco não é alterado diretamente; se o jogo for
+  encerrado sem salvar, nada muda.
 
 ## Teste automático da busca
 
@@ -181,7 +236,7 @@ ele procura o nome que estiver no campo **Jogador** e registra o resultado no
 ```
 menu ABERTO (Insert)
 autoscan: procurando 'WARLISON'
-busca de 'WARLISON': 19 ocorrencias
-registros validos: 2 (1.0 s)
-jogador escolhido: ID=00100000 copias=2 lesao=0
+[ML] busca de 'WARLISON': 17 ocorrencias
+[ML] registros validos: 2 (1.0 s)
+[ML] jogador escolhido: ID=00100000 copias=2 lesao=0
 ```

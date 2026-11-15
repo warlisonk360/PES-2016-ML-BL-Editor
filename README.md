@@ -114,12 +114,21 @@ Detalhes em `treinador-pc/README.md`.
 
 Em `mod-menu-pc/` há um **proxy `d3d9.dll`** que injeta um menu ImGui por cima
 do jogo (aberto com **Insert**). Na Etapa 2 ele também **lê e grava na memória do
-próprio jogo**, sempre por ação explícita e com botão de reverter:
+próprio jogo**, sempre por ação explícita e com botão de reverter. O menu tem um
+seletor no topo que separa as duas carreiras e as opções de abertura:
 
-- **Jogador**: busca o registro pelo nome, mostra ID/lesão e permite curar,
-  lesionar (teste) ou reverter a lesão.
-- **Dinheiro da Liga Master**: busca o saldo exibido no jogo, aplica um novo
-  valor e reverte para o original.
+- **Master League**: jogador do elenco (busca pelo nome, ID/lesão, curar,
+  lesionar/reverter) e dinheiro do clube (busca o saldo exibido, aplica e
+  reverte).
+- **Vida Futebolística** (Rumo ao Estrelato): as mesmas opções de lesão, no
+  registro do seu jogador. Não há dinheiro de clube nesse modo.
+- **Comunicações**: encurta a espera da mensagem "Estabelecendo comunicações" da
+  abertura, desmarcando a porta UDP automática no `settings.dat` (o mesmo efeito
+  de desmarcar *Automático* e pôr porta `0` no `Settings.exe`), com reverter.
+
+Cada modo guarda seu próprio resultado de busca. Com o menu aberto o teclado é
+modal também para o jogo (o proxy intercepta o DirectInput8), então as setas e o
+Enter não mexem no jogo por trás.
 
 - Funciona com o **DXVK** (o proxy carrega o DXVK renomeado como `d3d9_real.dll`).
 - Navegação por **setas/Tab + Enter**; **Esc** fecha (o jogo prende o cursor).
